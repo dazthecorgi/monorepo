@@ -46,6 +46,7 @@ import (
 	"source.quilibrium.com/quilibrium/monorepo/types/consensus"
 	tconsensus "source.quilibrium.com/quilibrium/monorepo/types/consensus"
 	"source.quilibrium.com/quilibrium/monorepo/types/crypto"
+	thypergraph "source.quilibrium.com/quilibrium/monorepo/types/hypergraph"
 	tkeys "source.quilibrium.com/quilibrium/monorepo/types/keys"
 	"source.quilibrium.com/quilibrium/monorepo/types/mocks"
 	"source.quilibrium.com/quilibrium/monorepo/types/p2p"
@@ -895,7 +896,7 @@ func TestAppConsensusEngine_Integration_GlobalAppCoordination(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create app time reel
-	appTimeReel, err := consensustime.NewAppTimeReel(logger, appAddress, proverRegistry, tempClockStore)
+	appTimeReel, err := consensustime.NewAppTimeReel(logger, appAddress, proverRegistry, tempClockStore, true)
 	require.NoError(t, err)
 
 	// Create event distributor that combines both
@@ -1664,14 +1665,12 @@ func TestAppConsensusEngine_Integration_ComplexMultiShardScenario(t *testing.T) 
 	type shardNode struct {
 		engine *AppConsensusEngine
 		pubsub *mockAppIntegrationPubSub
-		hg     *hypergraph.Hypergraph
+		hg     thypergraph.Hypergraph
 	}
-
-	mockGSC := &mockGlobalClientLocks{}
 
 	_, m, cleanup := tests.GenerateSimnetHosts(t, numShards*numNodesPerShard, []libp2p.Option{})
 	defer cleanup()
-	createAppNodeWithFactory := func(nodeIdx int, appAddress []byte, proverRegistry tconsensus.ProverRegistry, proverKey []byte, keyManager tkeys.KeyManager) (*AppConsensusEngine, *mockAppIntegrationPubSub, *consensustime.GlobalTimeReel, *hypergraph.Hypergraph, func()) {
+	createAppNodeWithFactory := func(nodeIdx int, appAddress []byte, proverRegistry tconsensus.ProverRegistry, proverKey []byte, keyManager tkeys.KeyManager) (*AppConsensusEngine, *mockAppIntegrationPubSub, *consensustime.GlobalTimeReel, thypergraph.Hypergraph, func()) {
 		cfg := zap.NewDevelopmentConfig()
 		adBI, _ := poseidon.HashBytes(proverKey)
 		addr := adBI.FillBytes(make([]byte, 32))
@@ -1771,7 +1770,7 @@ func TestAppConsensusEngine_Integration_ComplexMultiShardScenario(t *testing.T) 
 			nodeDB.Close()
 		}
 
-		return engine, pubsub, globalTimeReel, cleanup
+		return engine, pubsub, globalTimeReel, nodeHg, cleanup
 	}
 	shards := make([][]shardNode, numShards)
 
@@ -1846,7 +1845,7 @@ func TestAppConsensusEngine_Integration_ComplexMultiShardScenario(t *testing.T) 
 		messageBitmask[0] = 0x01
 		copy(messageBitmask[1:], shardAddresses[shardIdx])
 		node := shards[shardIdx][0]
-		hgs := []*hypergraph.Hypergraph{}
+		hgs := []thypergraph.Hypergraph{}
 		for _, s := range shards[shardIdx] {
 			hgs = append(hgs, s.hg)
 		}
@@ -2009,7 +2008,7 @@ func TestAppConsensusEngine_Integration_NoProversStaysInLoading(t *testing.T) {
 		globalTimeReel, err := consensustime.NewGlobalTimeReel(logger, proverRegistry, clockStore, 1, true)
 		require.NoError(t, err)
 
-		appTimeReel, err := consensustime.NewAppTimeReel(logger, appAddress, proverRegistry, clockStore)
+		appTimeReel, err := consensustime.NewAppTimeReel(logger, appAddress, proverRegistry, clockStore, true)
 		require.NoError(t, err)
 
 		eventDistributor := events.NewAppEventDistributor(
