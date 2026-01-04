@@ -25,9 +25,15 @@ func main() {
 	)
 	flag.Parse()
 
-	fmt.Println("P2P Ping Tool - Reading multiaddresses from stdin...")
-	fmt.Println("Enter multiaddresses one per line (Ctrl+D to finish):")
-	fmt.Println()
+	// Check if multiaddresses were provided as arguments
+	args := flag.Args()
+	useStdin := len(args) == 0
+
+	if useStdin {
+		fmt.Println("P2P Ping Tool - Reading multiaddresses from stdin...")
+		fmt.Println("Enter multiaddresses one per line (Ctrl+D to finish):")
+		fmt.Println()
+	}
 
 	// Create a minimal libp2p client
 	client, err := createClient()
@@ -42,36 +48,63 @@ func main() {
 	// Create ping service
 	pingService := ping.NewPingService(client)
 
-	// Read multiaddresses from stdin
-	scanner := bufio.NewScanner(os.Stdin)
 	var results []PingResult
 	lineNum := 0
 
-	for scanner.Scan() {
-		lineNum++
-		addrStr := strings.TrimSpace(scanner.Text())
+	if useStdin {
+		// Read multiaddresses from stdin
+		scanner := bufio.NewScanner(os.Stdin)
 
-		// Skip empty lines
-		if addrStr == "" {
-			continue
+		for scanner.Scan() {
+			lineNum++
+			addrStr := strings.TrimSpace(scanner.Text())
+
+			// Skip empty lines
+			if addrStr == "" {
+				continue
+			}
+
+			fmt.Printf("[%d] Testing: %s\n", lineNum, addrStr)
+
+			result := pingPeer(client, pingService, addrStr, *timeout)
+			results = append(results, result)
+
+			// Print immediate result
+			if result.Success {
+				fmt.Printf("    ✓ SUCCESS - RTT: %v\n", result.RTT)
+			} else {
+				fmt.Printf("    ✗ FAILED - %s\n", result.Error)
+			}
+			fmt.Println()
 		}
 
-		fmt.Printf("[%d] Testing: %s\n", lineNum, addrStr)
-
-		result := pingPeer(client, pingService, addrStr, *timeout)
-		results = append(results, result)
-
-		// Print immediate result
-		if result.Success {
-			fmt.Printf("    ✓ SUCCESS - RTT: %v\n", result.RTT)
-		} else {
-			fmt.Printf("    ✗ FAILED - %s\n", result.Error)
+		if err := scanner.Err(); err != nil {
+			log.Fatal("Error reading stdin:", err)
 		}
-		fmt.Println()
-	}
+	} else {
+		// Use multiaddresses from command-line arguments
+		for i, addrStr := range args {
+			lineNum = i + 1
+			addrStr = strings.TrimSpace(addrStr)
 
-	if err := scanner.Err(); err != nil {
-		log.Fatal("Error reading stdin:", err)
+			// Skip empty arguments
+			if addrStr == "" {
+				continue
+			}
+
+			fmt.Printf("[%d] Testing: %s\n", lineNum, addrStr)
+
+			result := pingPeer(client, pingService, addrStr, *timeout)
+			results = append(results, result)
+
+			// Print immediate result
+			if result.Success {
+				fmt.Printf("    ✓ SUCCESS - RTT: %v\n", result.RTT)
+			} else {
+				fmt.Printf("    ✗ FAILED - %s\n", result.Error)
+			}
+			fmt.Println()
+		}
 	}
 
 	// Print summary
@@ -87,6 +120,11 @@ func main() {
 
 	fmt.Printf("Successful: %d/%d (%.1f%%)\n", successful, len(results),
 		float64(successful)/float64(len(results))*100)
+
+	// Exit with non-zero status if any failures occurred
+	if successful < len(results) {
+		os.Exit(1)
+	}
 }
 
 type PingResult struct {

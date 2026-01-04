@@ -328,6 +328,14 @@ func LoadConfig(configPath string, proverKey string, skipGenesisCheck bool) (
 			config.Engine.StatsMultiaddr = multiAddr
 		}
 
+		if archiveMode := os.Getenv("DEFAULT_ARCHIVE_MODE"); archiveMode == "true" {
+			config.Engine.ArchiveMode = true
+		}
+
+		if bootstrapPeer := os.Getenv("DEFAULT_BOOTSTRAP_PEER"); bootstrapPeer != "" {
+			config.P2P.BootstrapPeers = []string{bootstrapPeer}
+		}
+
 		fmt.Println("Saving config to", configPath)
 		if err = SaveConfig(configPath, config); err != nil {
 			log.Panic("Failed to save config", err)

@@ -55,7 +55,7 @@ rm -rf "$FLINT_TMP"
 
 ./docker/rustup-init.sh -y --profile minimal
 
-cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.2.1+v0.25.0
+cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.4.0+v0.28.3
 
 bash install-emp.sh
 
@@ -78,36 +78,6 @@ make
 sudo make install
 popd
 
-pushd vdf
-./generate.sh
-popd
-
-pushd ferret
-./generate.sh
-popd
-
-pushd bls48581
-./generate.sh
-popd
-
-pushd bulletproofs
-./generate.sh
-popd
-
-pushd verenc
-./generate.sh
-popd
-
-pushd channel
-./generate.sh
-popd
-
-pushd channel
-./generate.sh
-popd
-
-pushd rpm
-./generate.sh
-popd
+./build-rust-crates.sh
 
 echo "Source dependencies installed."
