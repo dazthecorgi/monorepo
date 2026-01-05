@@ -92,6 +92,8 @@ RUN apt update && apt install -y wget && \
 
 ENV PATH=$PATH:/usr/local/go/bin
 ENV GOPROXY=direct
+ENV GOMODCACHE=/go/pkg/mod
+ENV GOCACHE=/root/.cache/go-build
 
 # -----------------------------------------------------------------------------
 # Stage: rust-base
@@ -145,37 +147,44 @@ COPY --exclude=node \
 
 FROM common-context AS gen-channel
 WORKDIR /opt/ceremonyclient/channel
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 RUN ./generate.sh
 
 FROM common-context AS gen-vdf
 WORKDIR /opt/ceremonyclient/vdf
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 RUN ./generate.sh
 
 FROM common-context AS gen-ferret
 WORKDIR /opt/ceremonyclient/ferret
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 RUN ./generate.sh
 
 FROM common-context AS gen-bls48581
 WORKDIR /opt/ceremonyclient/bls48581
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 RUN ./generate.sh
 
 FROM common-context AS gen-rpm
 WORKDIR /opt/ceremonyclient/rpm
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 RUN ./generate.sh
 
 FROM common-context AS gen-verenc
 WORKDIR /opt/ceremonyclient/verenc
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 RUN ./generate.sh
 
 FROM common-context AS gen-bulletproofs
 WORKDIR /opt/ceremonyclient/bulletproofs
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 RUN ./generate.sh
 
 # -----------------------------------------------------------------------------
@@ -212,7 +221,9 @@ COPY --from=gen-bulletproofs /opt/ceremonyclient/target/release/libbulletproofs.
 FROM common-context AS build-p2p-ping
 COPY ./node /opt/ceremonyclient/node
 WORKDIR /opt/ceremonyclient/go-libp2p/examples/p2p-ping
-RUN go build -o /usr/bin/p2p-ping .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -o /usr/bin/p2p-ping .
 
 # -----------------------------------------------------------------------------
 # Stage: build-node
@@ -220,7 +231,9 @@ RUN go build -o /usr/bin/p2p-ping .
 FROM build-context AS build-node
 COPY ./node /opt/ceremonyclient/node
 WORKDIR /opt/ceremonyclient/node
-RUN ./build.sh && cp node /usr/bin
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    ./build.sh && cp node /usr/bin
 
 # -----------------------------------------------------------------------------
 # Stage: build-qclient
@@ -231,14 +244,18 @@ ARG TARGETARCH
 
 COPY ./node /opt/ceremonyclient/node
 WORKDIR /opt/ceremonyclient/node
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY ./client /opt/ceremonyclient/client
 WORKDIR /opt/ceremonyclient/client
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # ARG BINARIES_DIR=/opt/ceremonyclient/target/release
-# RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} ./build.sh -o qclient
+# RUN --mount=type=cache,target=/go/pkg/mod \
+#    --mount=type=cache,target=/root/.cache/go-build \
+#    GOOS=${TARGETOS} GOARCH=${TARGETARCH} ./build.sh -o qclient
 # RUN cp qclient /usr/bin
 
 # -----------------------------------------------------------------------------

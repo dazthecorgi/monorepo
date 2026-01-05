@@ -12,173 +12,20 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
-	multiaddr "github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/go-libp2p-blossomsub/pb"
 	"source.quilibrium.com/quilibrium/monorepo/node/p2p"
+	"source.quilibrium.com/quilibrium/monorepo/node/p2p/testutil"
 	"source.quilibrium.com/quilibrium/monorepo/node/rpc"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	"source.quilibrium.com/quilibrium/monorepo/types/channel"
 	p2ptypes "source.quilibrium.com/quilibrium/monorepo/types/p2p"
 )
-
-// mockPubSub implements the p2p.PubSub interface for testing
-type mockPubSub struct {
-	peerID         []byte
-	subscriptions  map[string][]func(message *pb.Message) error // Support multiple handlers per bitmask
-	validators     map[string]func(peerID peer.ID, message *pb.Message) p2ptypes.ValidationResult
-	publishedData  map[string][]byte
-	mu             sync.RWMutex
-	validatorCalls int
-	messageCount   int
-	nextSubID      int // For generating unique subscription IDs
-}
-
-func newMockPubSub() *mockPubSub {
-	// Generate a random peer ID for testing
-	peerID := make([]byte, 32)
-	rand.Read(peerID)
-
-	return &mockPubSub{
-		peerID:        peerID,
-		subscriptions: make(map[string][]func(message *pb.Message) error),
-		validators:    make(map[string]func(peer.ID, *pb.Message) p2ptypes.ValidationResult),
-		publishedData: make(map[string][]byte),
-	}
-}
-
-// Implement all p2p.PubSub interface methods
-func (m *mockPubSub) PublishToBitmask(bitmask []byte, data []byte) error {
-	m.mu.Lock()
-	m.publishedData[string(bitmask)] = data
-
-	// Trigger any subscriptions - make a copy of ALL handlers for this bitmask
-	var handlersToCall []func(message *pb.Message) error
-	if handlers, exists := m.subscriptions[string(bitmask)]; exists {
-		handlersToCall = make([]func(message *pb.Message) error, len(handlers))
-		copy(handlersToCall, handlers)
-	}
-	m.messageCount++
-	msgSeqno := m.messageCount
-	m.mu.Unlock()
-
-	// Call all handlers without holding lock
-	if len(handlersToCall) > 0 {
-		msg := &pb.Message{
-			Data:    data,
-			From:    m.peerID,
-			Seqno:   []byte(fmt.Sprintf("%d", msgSeqno)),
-			Bitmask: bitmask,
-		}
-		for _, handler := range handlersToCall {
-			go func(h func(message *pb.Message) error) {
-				h(msg)
-			}(handler)
-		}
-	}
-
-	return nil
-}
-
-func (m *mockPubSub) Publish(address []byte, data []byte) error {
-	// Simple mock - just use address as bitmask
-	return m.PublishToBitmask(address, data)
-}
-
-func (m *mockPubSub) Subscribe(bitmask []byte, handler func(message *pb.Message) error) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	bitmaskKey := string(bitmask)
-
-	// Add handler to the list of handlers for this bitmask
-	if _, exists := m.subscriptions[bitmaskKey]; !exists {
-		m.subscriptions[bitmaskKey] = make([]func(message *pb.Message) error, 0)
-	}
-	m.subscriptions[bitmaskKey] = append(m.subscriptions[bitmaskKey], handler)
-
-	return nil
-}
-
-func (m *mockPubSub) Unsubscribe(bitmask []byte, raw bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// In a real implementation, we'd need to track individual subscriptions
-	// For this mock, we'll just clear all handlers for this bitmask
-	delete(m.subscriptions, string(bitmask))
-}
-
-func (m *mockPubSub) RegisterValidator(
-	bitmask []byte,
-	validator func(peerID peer.ID, message *pb.Message) p2ptypes.ValidationResult,
-	sync bool,
-) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.validators[string(bitmask)] = validator
-	return nil
-}
-
-func (m *mockPubSub) UnregisterValidator(bitmask []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.validators, string(bitmask))
-	return nil
-}
-
-func (m *mockPubSub) GetPeerID() []byte {
-	return m.peerID
-}
-
-func (m *mockPubSub) GetValidatorCallCount() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.validatorCalls
-}
-
-// Implement remaining interface methods with basic mocks
-func (m *mockPubSub) GetPeerstoreCount() int                       { return 5 }
-func (m *mockPubSub) GetNetworkPeersCount() int                    { return 10 }
-func (m *mockPubSub) GetRandomPeer(bitmask []byte) ([]byte, error) { return m.peerID, nil }
-func (m *mockPubSub) GetMultiaddrOfPeerStream(ctx context.Context, peerId []byte) <-chan multiaddr.Multiaddr {
-	ch := make(chan multiaddr.Multiaddr)
-	close(ch)
-	return ch
-}
-func (m *mockPubSub) GetMultiaddrOfPeer(peerId []byte) string { return "/ip4/127.0.0.1/tcp/8080" }
-func (m *mockPubSub) GetOwnMultiaddrs() []multiaddr.Multiaddr {
-	ma, _ := multiaddr.NewMultiaddr("/ip4/127.0.0.1/tcp/8080")
-	return []multiaddr.Multiaddr{ma}
-}
-func (m *mockPubSub) StartDirectChannelListener(key []byte, purpose string, server *grpc.Server) error {
-	return nil
-}
-func (m *mockPubSub) GetDirectChannel(ctx context.Context, peerId []byte, purpose string) (*grpc.ClientConn, error) {
-	return nil, nil
-}
-func (m *mockPubSub) GetNetworkInfo() *protobufs.NetworkInfoResponse {
-	return &protobufs.NetworkInfoResponse{}
-}
-func (m *mockPubSub) SignMessage(msg []byte) ([]byte, error)       { return msg, nil }
-func (m *mockPubSub) GetPublicKey() []byte                         { return m.peerID }
-func (m *mockPubSub) GetPeerScore(peerId []byte) int64             { return 100 }
-func (m *mockPubSub) SetPeerScore(peerId []byte, score int64)      {}
-func (m *mockPubSub) AddPeerScore(peerId []byte, scoreDelta int64) {}
-func (m *mockPubSub) Reconnect(peerId []byte) error                { return nil }
-func (m *mockPubSub) Bootstrap(ctx context.Context) error          { return nil }
-func (m *mockPubSub) DiscoverPeers(ctx context.Context) error      { return nil }
-func (m *mockPubSub) GetNetwork() uint                             { return 0 }
-func (m *mockPubSub) IsPeerConnected(peerId []byte) bool           { return true }
-func (m *mockPubSub) Reachability() *wrapperspb.BoolValue          { return wrapperspb.Bool(true) }
-func (m *mockPubSub) Close() error                                 { return nil }
-func (m *mockPubSub) SetShutdownContext(ctx context.Context)       {}
 
 // Test helper functions
 func createTestConfigs() (*config.P2PConfig, *config.EngineConfig, error) {
@@ -205,52 +52,17 @@ func createTestConfigs() (*config.P2PConfig, *config.EngineConfig, error) {
 	return p2pConfig, engineConfig, nil
 }
 
-func setupTestServer(t *testing.T, mockPubSub *mockPubSub, p2pConfig *config.P2PConfig) (string, func()) {
-	// Create TLS credentials for the test server using the provided config
-	tlsCreds, err := p2p.NewPeerAuthenticator(
-		zap.NewNop(),
-		p2pConfig,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		map[string]channel.AllowedPeerPolicyType{
-			"quilibrium.node.proxy.pb.PubSubProxy": channel.OnlySelfPeer,
-		},
-		nil,
-	).CreateServerTLSCredentials()
-	require.NoError(t, err)
-
+func setupTestServer(t *testing.T, mockPubSub *testutil.MockPubSub, p2pConfig *config.P2PConfig) (string, func()) {
 	// Find available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-
 	addr := listener.Addr().String()
 	listener.Close()
 
-	// Create gRPC server with TLS
-	server := grpc.NewServer(grpc.Creds(tlsCreds))
-	proxyServer := rpc.NewPubSubProxyServer(mockPubSub, zap.NewNop())
-	protobufs.RegisterPubSubProxyServer(server, proxyServer)
-
 	// Start server
-	listener, err = net.Listen("tcp", addr)
+	cleanup, err := testutil.StartPubSubProxyServer(mockPubSub, p2pConfig, addr)
 	require.NoError(t, err)
-
-	go func() {
-		if err := server.Serve(listener); err != nil {
-			t.Logf("Server error: %v", err)
-		}
-	}()
-
-	// Wait for server to start
-	time.Sleep(100 * time.Millisecond)
-
-	return addr, func() {
-		server.Stop()
-		listener.Close()
-	}
+	return addr, cleanup
 }
 
 func TestProxyBlossomSubCreation(t *testing.T) {
@@ -297,7 +109,7 @@ func TestBasicPublishSubscribe(t *testing.T) {
 	p2pConfig, engineConfig, err := createTestConfigs()
 	require.NoError(t, err)
 
-	mockPubSub := newMockPubSub()
+	mockPubSub := testutil.NewMockPubSub()
 	serverAddr, cleanup := setupTestServer(t, mockPubSub, p2pConfig)
 	defer cleanup()
 
@@ -320,10 +132,7 @@ func TestBasicPublishSubscribe(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify data was published to mock
-	mockPubSub.mu.RLock()
-	publishedData := mockPubSub.publishedData[string(testBitmask)]
-	mockPubSub.mu.RUnlock()
-
+	publishedData := mockPubSub.GetPublishedData(testBitmask)
 	assert.Equal(t, testData, publishedData)
 
 	// Test subscribe
@@ -366,7 +175,7 @@ func TestValidatorRegistration(t *testing.T) {
 	p2pConfig, engineConfig, err := createTestConfigs()
 	require.NoError(t, err)
 
-	mockPubSub := newMockPubSub()
+	mockPubSub := testutil.NewMockPubSub()
 	serverAddr, cleanup := setupTestServer(t, mockPubSub, p2pConfig)
 	defer cleanup()
 
@@ -423,7 +232,7 @@ func TestTLSConnection(t *testing.T) {
 	assert.NotNil(t, tlsCreds, "TLS credentials should not be nil")
 
 	// Test TLS connection by setting up a TLS server and connecting to it
-	mockPubSub := newMockPubSub()
+	mockPubSub := testutil.NewMockPubSub()
 
 	// Find available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -469,10 +278,7 @@ func TestTLSConnection(t *testing.T) {
 	assert.NoError(t, err, "should be able to publish over TLS connection")
 
 	// Verify the message was received by the server
-	mockPubSub.mu.RLock()
-	publishedData := mockPubSub.publishedData[string(testBitmask)]
-	mockPubSub.mu.RUnlock()
-
+	publishedData := mockPubSub.GetPublishedData(testBitmask)
 	assert.Equal(t, testData, publishedData, "message should have been transmitted over TLS")
 }
 
@@ -511,7 +317,7 @@ func TestTLSXSignConnection(t *testing.T) {
 	assert.NotNil(t, serverTLSCreds, "TLS credentials should not be nil")
 
 	// Test TLS connection by setting up a TLS server and connecting to it
-	mockPubSub := newMockPubSub()
+	mockPubSub := testutil.NewMockPubSub()
 
 	// Find available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -583,10 +389,7 @@ func TestTLSXSignConnection(t *testing.T) {
 	assert.NoError(t, err, "should be able to publish over TLS connection")
 
 	// Verify the message was received by the server
-	mockPubSub.mu.RLock()
-	publishedData := mockPubSub.publishedData[string(testBitmask)]
-	mockPubSub.mu.RUnlock()
-
+	publishedData := mockPubSub.GetPublishedData(testBitmask)
 	assert.Equal(t, testData, publishedData, "message should have been transmitted over TLS")
 }
 
@@ -615,7 +418,7 @@ func TestTLSKeyMismatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set up TLS server with server keys
-	mockPubSub := newMockPubSub()
+	mockPubSub := testutil.NewMockPubSub()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -671,7 +474,7 @@ func TestTLSBidirectionalVerification(t *testing.T) {
 	sharedP2PConfig, engineConfig, err := createTestConfigs()
 	require.NoError(t, err)
 
-	mockPubSub := newMockPubSub()
+	mockPubSub := testutil.NewMockPubSub()
 
 	// Start server with shared key
 	serverAddr, cleanup := setupTestServer(t, mockPubSub, sharedP2PConfig)
@@ -695,10 +498,7 @@ func TestTLSBidirectionalVerification(t *testing.T) {
 	assert.NoError(t, err, "should be able to publish over bidirectionally verified TLS")
 
 	// Verify the message was received
-	mockPubSub.mu.RLock()
-	publishedData := mockPubSub.publishedData[string(testBitmask)]
-	mockPubSub.mu.RUnlock()
-
+	publishedData := mockPubSub.GetPublishedData(testBitmask)
 	assert.Equal(t, testData, publishedData, "message should have been transmitted successfully")
 }
 
@@ -709,7 +509,7 @@ func TestFullProxyIntegration(t *testing.T) {
 	p2pConfig, engineConfig, err := createTestConfigs()
 	require.NoError(t, err)
 
-	mockPubSub := newMockPubSub()
+	mockPubSub := testutil.NewMockPubSub()
 	serverAddr, cleanup := setupTestServer(t, mockPubSub, p2pConfig)
 	defer cleanup()
 

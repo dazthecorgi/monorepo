@@ -39,7 +39,8 @@ p2p:
   bootstrapPeers:
   - /ip4/172.28.0.10/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc
   listenMultiaddr: /ip4/0.0.0.0/udp/8336/quic-v1
-  streamListenMultiaddr: ""
+  streamListenMultiaddr: "/ip4/172.28.0.11/tcp/8340"
+  useProxyBlossomSub: true
   peerPrivKey: 8f875c435dea3ca3a97256eec0d2b406bb09ff10cfaa6b3935b6032efe4e257497a0c23b0d0bc3febf6518ab444ee5a92519ecb2ec2062f242909e437aa25981deef5cc5633431d9e493286631854f77c4140b7534a8657a59c1c4d7e7a6b368e5e092b86e6c25f8eb6de1d4cb50e0c36080
   traceLogFile: ""
   traceLogStdout: false

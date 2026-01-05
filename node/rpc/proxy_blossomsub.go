@@ -2,20 +2,22 @@ package rpc
 
 import (
 	"context"
-	"encoding/hex"
+	// "encoding/hex"
 	"fmt"
 
-	"github.com/libp2p/go-libp2p/core/crypto"
+	// "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	multiaddr "github.com/multiformats/go-multiaddr"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/go-libp2p-blossomsub/pb"
-	qp2p "source.quilibrium.com/quilibrium/monorepo/node/p2p"
+
+	// qp2p "source.quilibrium.com/quilibrium/monorepo/node/p2p"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	"source.quilibrium.com/quilibrium/monorepo/types/p2p"
 )
@@ -41,20 +43,20 @@ func NewProxyBlossomSub(
 	logger *zap.Logger,
 	coreId uint,
 ) (*ProxyBlossomSub, error) {
-	if coreId == 0 {
-		return nil, errors.Wrap(
-			errors.New("proxy blossomsub should not be used for master node"),
-			"new proxy blossom sub",
-		)
-	}
+	// if coreId == 0 {
+	// 	return nil, errors.Wrap(
+	// 		errors.New("proxy blossomsub should not be used for master node"),
+	// 		"new proxy blossom sub",
+	// 	)
+	// }
 
 	// Check if proxy mode is enabled
-	if engineConfig == nil || !engineConfig.EnableMasterProxy {
-		return nil, errors.Wrap(
-			errors.New("proxy mode is not enabled in engine config"),
-			"new proxy blossom sub",
-		)
-	}
+	// if engineConfig == nil || !engineConfig.EnableMasterProxy {
+	// 	return nil, errors.Wrap(
+	// 		errors.New("proxy mode is not enabled in engine config"),
+	// 		"new proxy blossom sub",
+	// 	)
+	// }
 
 	logger = logger.With(
 		zap.String("component", "proxy_blossomsub"),
@@ -101,44 +103,46 @@ func NewProxyBlossomSub(
 		zap.String("address", masterAddr),
 		zap.String("stream_listen_multiaddr", streamMultiaddr))
 
-	pubkeyBytes, err := hex.DecodeString(p2pConfig.PeerPrivKey)
-	if err != nil {
-		return nil, errors.Wrap(err, "new proxy blossom sub")
-	}
+	// pubkeyBytes, err := hex.DecodeString(p2pConfig.PeerPrivKey)
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "new proxy blossom sub")
+	// }
 
-	pubkey, err := crypto.UnmarshalEd448PublicKey(pubkeyBytes[57:])
-	if err != nil {
-		return nil, errors.Wrap(err, "new proxy blossom sub")
-	}
+	// pubkey, err := crypto.UnmarshalEd448PublicKey(pubkeyBytes[57:])
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "new proxy blossom sub")
+	// }
 
-	peerid, err := peer.IDFromPublicKey(pubkey)
-	if err != nil {
-		return nil, errors.Wrap(err, "new proxy blossom sub")
-	}
+	// peerid, err := peer.IDFromPublicKey(pubkey)
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "new proxy blossom sub")
+	// }
 
 	// Using kind of a hack to do this here, but we don't have the other two
 	// dependencies at this point in the init loop
-	tlsCreds, err := qp2p.NewPeerAuthenticator(
-		logger,
-		p2pConfig,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-	).CreateClientTLSCredentials([]byte(peerid))
-	if err != nil {
-		return nil, errors.Wrap(err, "new proxy blossom sub")
-	}
+	// tlsCreds, err := qp2p.NewPeerAuthenticator(
+	// 	logger,
+	// 	p2pConfig,
+	// 	nil,
+	// 	nil,
+	// 	nil,
+	// 	nil,
+	// 	nil,
+	// 	nil,
+	// 	nil,
+	// ).CreateClientTLSCredentials([]byte(peerid))
+	// if err != nil {
+	// 	return nil, errors.Wrap(err, "new proxy blossom sub")
+	// }
 
 	logger.Info("using TLS connection to master node")
 
 	// Create gRPC connection with TLS
 	conn, err := grpc.Dial(
 		masterAddr,
-		grpc.WithTransportCredentials(tlsCreds),
+		// TODO revert this
+		// grpc.WithTransportCredentials(tlsCreds),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(100*1024*1024)),
 	)
 	if err != nil {

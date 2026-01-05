@@ -1831,7 +1831,9 @@ func (b *BlossomSub) GetDirectChannel(
 		nil,
 		[][]byte{peerID},
 		map[string]channel.AllowedPeerPolicyType{
-			"quilibrium.node.proxy.pb.PubSubProxy": channel.OnlySelfPeer,
+			// TODO revert this
+			// "quilibrium.node.proxy.pb.PubSubProxy": channel.OnlySelfPeer,
+			"quilibrium.node.proxy.pb.PubSubProxy": channel.AnyPeer,
 		},
 		map[string]channel.AllowedPeerPolicyType{},
 	).CreateClientTLSCredentials(peerID)

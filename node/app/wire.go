@@ -203,11 +203,26 @@ var appConsensusSet = wire.NewSet(
 	app.NewAppConsensusEngineFactory,
 )
 
-func NewDHTNode(*zap.Logger, *config.Config, uint) (*DHTNode, error) {
+func NewDHTNodeWithProxyPubsub(*zap.Logger, *config.Config, uint) (*DHTNode, error) {
+	panic(wire.Build(
+		proxyPubSubSet,
+		newDHTNode,
+	))
+}
+
+func NewDHTNodeWithoutProxyPubsub(*zap.Logger, *config.Config, uint) (*DHTNode, error) {
 	panic(wire.Build(
 		pubSubSet,
 		newDHTNode,
 	))
+}
+
+func NewDHTNode(logger *zap.Logger, config *config.Config, coreId uint) (*DHTNode, error) {
+	if config.P2P.UseProxyBlossomSub {
+		return NewDHTNodeWithProxyPubsub(logger, config, coreId)
+	} else {
+		return NewDHTNodeWithoutProxyPubsub(logger, config, coreId)
+	}
 }
 
 func NewDBConsole(*config.Config) (*DBConsole, error) {
@@ -381,7 +396,29 @@ func provideGlobalTimeReel(
 	return factory.CreateGlobalTimeReel()
 }
 
-func NewMasterNode(
+func NewMasterNodeWithProxyPubsub(
+	logger *zap.Logger,
+	config *config.Config,
+	coreId uint,
+) (*MasterNode, error) {
+	panic(wire.Build(
+		verencSet,
+		compilerSet,
+		keyManagerSet,
+		storeSet,
+		proxyPubSubSet,
+		engineSet,
+		hypergraphSet,
+		validatorSet,
+		globalConsensusSet,
+		provideGlobalConsensusComponents,
+		provideGlobalConsensusEngine,
+		provideGlobalTimeReelFromComponents,
+		newMasterNode,
+	))
+}
+
+func NewMasterNodeWithoutProxyPubsub(
 	logger *zap.Logger,
 	config *config.Config,
 	coreId uint,
@@ -401,4 +438,16 @@ func NewMasterNode(
 		provideGlobalTimeReelFromComponents,
 		newMasterNode,
 	))
+}
+
+func NewMasterNode(
+	logger *zap.Logger,
+	config *config.Config,
+	coreId uint,
+) (*MasterNode, error) {
+	if config.P2P.UseProxyBlossomSub {
+		return NewMasterNodeWithProxyPubsub(logger, config, coreId)
+	} else {
+		return NewMasterNodeWithoutProxyPubsub(logger, config, coreId)
+	}
 }

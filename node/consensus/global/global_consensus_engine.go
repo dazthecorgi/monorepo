@@ -1065,7 +1065,7 @@ func (e *GlobalConsensusEngine) endProvingRank(rank uint64) {
 func (e *GlobalConsensusEngine) setupGRPCServer() error {
 	// Parse the StreamListenMultiaddr to get the listen address
 	listenAddr := "0.0.0.0:8340" // Default
-	if e.config.P2P.StreamListenMultiaddr != "" {
+	if !e.config.P2P.UseProxyBlossomSub && e.config.P2P.StreamListenMultiaddr != "" {
 		// Parse the multiaddr
 		maddr, err := ma.NewMultiaddr(e.config.P2P.StreamListenMultiaddr)
 		if err != nil {
@@ -1109,7 +1109,9 @@ func (e *GlobalConsensusEngine) setupGRPCServer() error {
 			"quilibrium.node.global.pb.GlobalService":                    channel.AnyPeer,
 			"quilibrium.node.global.pb.OnionService":                     channel.AnyPeer,
 			"quilibrium.node.global.pb.KeyRegistryService":               channel.OnlySelfPeer,
-			"quilibrium.node.proxy.pb.PubSubProxy":                       channel.OnlySelfPeer,
+			// TODO revert this
+			// "quilibrium.node.proxy.pb.PubSubProxy":                       channel.OnlySelfPeer,
+			"quilibrium.node.proxy.pb.PubSubProxy":                       channel.AnyPeer,
 		},
 		map[string]channel.AllowedPeerPolicyType{
 			// Alternative nodes may not need to make this only self peer, but this

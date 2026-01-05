@@ -55,6 +55,7 @@ type P2PConfig struct {
 	BootstrapPeers                []string      `yaml:"bootstrapPeers"`
 	ListenMultiaddr               string        `yaml:"listenMultiaddr"`
 	StreamListenMultiaddr         string        `yaml:"streamListenMultiaddr"`
+	UseProxyBlossomSub            bool          `yaml:"useProxyBlossomSub"`
 	AnnounceListenMultiaddr       string        `yaml:"announceListenMultiaddr"`
 	AnnounceStreamListenMultiaddr string        `yaml:"announceStreamListenMultiaddr"`
 	PeerPrivKey                   string        `yaml:"peerPrivKey"`

@@ -10,6 +10,7 @@ name: quilibrium-simtest
 # Environment variables:
 #   TARGETARCH: Target architecture (default: arm64)
 
+# TODO disable communication between archives on the network level except via the coordinator
 networks:
   quilibrium-isolated:
     driver: bridge
@@ -19,6 +20,31 @@ networks:
         - subnet: 172.28.0.0/16
 
 services:
+  # Coordinator node - provides PubSubProxy service for archive nodes
+  coordinator:
+    build:
+      context: ..
+      dockerfile: simtest/coordinator/Dockerfile
+    image: quilibrium-coordinator:latest
+    hostname: coordinator
+    command: ["--listen=0.0.0.0:8340", "--network=1"]
+    networks:
+      quilibrium-isolated:
+        ipv4_address: 172.28.0.11
+    ports:
+      - "8340:8340"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8340"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
   # Bootstrap node - starts first and provides initial peer discovery
   bootstrap:
     build:
@@ -30,6 +56,9 @@ services:
     image: quilibrium-simtest:latest
     hostname: bootstrap
     command: ["--dht-only", "--network=1"]
+    depends_on:
+      coordinator:
+        condition: service_healthy
     networks:
       quilibrium-isolated:
         ipv4_address: 172.28.0.10
@@ -65,6 +94,8 @@ services:
       - quilibrium-isolated
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
+      coordinator:
+        condition: service_healthy
       bootstrap:
         condition: service_healthy
     volumes:
@@ -93,6 +124,8 @@ services:
       - quilibrium-isolated
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
+      coordinator:
+        condition: service_healthy
       bootstrap:
         condition: service_healthy
     volumes:
@@ -121,6 +154,8 @@ services:
       - quilibrium-isolated
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
+      coordinator:
+        condition: service_healthy
       bootstrap:
         condition: service_healthy
     volumes:
@@ -149,6 +184,8 @@ services:
       - quilibrium-isolated
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
+      coordinator:
+        condition: service_healthy
       bootstrap:
         condition: service_healthy
     volumes:
