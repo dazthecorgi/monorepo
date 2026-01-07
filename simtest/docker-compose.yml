@@ -33,12 +33,14 @@ services:
     networks:
       quilibrium-isolated:
         ipv4_address: 172.28.0.10
+    extra_hosts:
+      - "bootstrap.local:172.28.0.10"
     environment:
       - QUILIBRIUM_SIGNATURE_CHECK=false
     volumes:
       - ./config/bootstrap-config/:/root/.config
     healthcheck:
-      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/172.28.0.10/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc"]
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/dns/bootstrap.local/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -63,6 +65,8 @@ services:
     image: quilibrium-simtest:latest
     networks:
       - quilibrium-isolated
+    extra_hosts:
+      - "bootstrap.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
       bootstrap:
@@ -91,6 +95,8 @@ services:
     image: quilibrium-simtest:latest
     networks:
       - quilibrium-isolated
+    extra_hosts:
+      - "bootstrap.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
       bootstrap:
@@ -119,6 +125,8 @@ services:
     image: quilibrium-simtest:latest
     networks:
       - quilibrium-isolated
+    extra_hosts:
+      - "bootstrap.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
       bootstrap:
@@ -147,6 +155,8 @@ services:
     image: quilibrium-simtest:latest
     networks:
       - quilibrium-isolated
+    extra_hosts:
+      - "bootstrap.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
       bootstrap:
