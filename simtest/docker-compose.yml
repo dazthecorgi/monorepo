@@ -67,7 +67,9 @@ services:
     volumes:
       - ./config/bootstrap-config/:/root/.config
     healthcheck:
+      # We can't use p2p-ping here because the bootstrap node is using the pubsub proxy
       test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/172.28.0.10/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc"]
+      # test: ["CMD", "ps", "-p", "1"]
       interval: 30s
       timeout: 10s
       retries: 3

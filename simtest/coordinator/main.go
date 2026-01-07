@@ -78,7 +78,7 @@ func main() {
 	}
 
 	// Start PubSubProxy server
-	mockPubSub := testutil.NewMockPubSub()
+	mockPubSub := testutil.NewMockPubSubWithLogger(logger)
 	cleanup, err := testutil.StartPubSubProxyServer(mockPubSub, p2pConfig, addr)
 	if err != nil {
 		logger.Fatal("Failed to start PubSubProxy server", zap.Error(err))

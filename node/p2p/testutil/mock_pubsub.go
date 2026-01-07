@@ -16,7 +16,6 @@ import (
 
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/go-libp2p-blossomsub/pb"
-	// "source.quilibrium.com/quilibrium/monorepo/node/p2p"
 	"source.quilibrium.com/quilibrium/monorepo/node/rpc"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	// "source.quilibrium.com/quilibrium/monorepo/types/channel"
@@ -32,6 +31,7 @@ type MockPubSub struct {
 	mu             sync.RWMutex
 	validatorCalls int
 	messageCount   int
+	logger         *zap.Logger
 }
 
 func NewMockPubSub() *MockPubSub {
@@ -44,10 +44,33 @@ func NewMockPubSub() *MockPubSub {
 		subscriptions: make(map[string][]func(message *pb.Message) error),
 		validators:    make(map[string]func(peer.ID, *pb.Message) p2ptypes.ValidationResult),
 		publishedData: make(map[string][]byte),
+		logger:        zap.NewNop(),
+	}
+}
+
+// NewMockPubSubWithLogger creates a MockPubSub with a custom logger
+func NewMockPubSubWithLogger(logger *zap.Logger) *MockPubSub {
+	peerID := make([]byte, 32)
+	rand.Read(peerID)
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	return &MockPubSub{
+		peerID:        peerID,
+		subscriptions: make(map[string][]func(message *pb.Message) error),
+		validators:    make(map[string]func(peer.ID, *pb.Message) p2ptypes.ValidationResult),
+		publishedData: make(map[string][]byte),
+		logger:        logger,
 	}
 }
 
 func (m *MockPubSub) PublishToBitmask(bitmask []byte, data []byte) error {
+	m.logger.Debug("PublishToBitmask called",
+		zap.String("bitmask", fmt.Sprintf("%x", bitmask)),
+		zap.Int("data_length", len(data)))
+
 	m.mu.Lock()
 	m.publishedData[string(bitmask)] = data
 
@@ -59,6 +82,11 @@ func (m *MockPubSub) PublishToBitmask(bitmask []byte, data []byte) error {
 	m.messageCount++
 	msgSeqno := m.messageCount
 	m.mu.Unlock()
+
+	m.logger.Debug("Publishing to subscribers",
+		zap.String("bitmask", fmt.Sprintf("%x", bitmask)),
+		zap.Int("handler_count", len(handlersToCall)),
+		zap.Int("seqno", msgSeqno))
 
 	if len(handlersToCall) > 0 {
 		msg := &pb.Message{
@@ -86,10 +114,18 @@ func (m *MockPubSub) Subscribe(bitmask []byte, handler func(message *pb.Message)
 	defer m.mu.Unlock()
 
 	bitmaskKey := string(bitmask)
+	m.logger.Debug("Subscribe called",
+		zap.String("bitmask", fmt.Sprintf("%x", bitmask)),
+		zap.Int("existing_handlers", len(m.subscriptions[bitmaskKey])))
+
 	if _, exists := m.subscriptions[bitmaskKey]; !exists {
 		m.subscriptions[bitmaskKey] = make([]func(message *pb.Message) error, 0)
 	}
 	m.subscriptions[bitmaskKey] = append(m.subscriptions[bitmaskKey], handler)
+
+	m.logger.Debug("Subscription added",
+		zap.String("bitmask", fmt.Sprintf("%x", bitmask)),
+		zap.Int("total_handlers", len(m.subscriptions[bitmaskKey])))
 
 	return nil
 }
@@ -172,7 +208,7 @@ func (m *MockPubSub) GetPublishedData(bitmask []byte) []byte {
 }
 
 // StartPubSubProxyServer sets up a test gRPC server with TLS at the specified address and returns the cleanup function
-func StartPubSubProxyServer(mockPubSub *MockPubSub, p2pConfig *config.P2PConfig, addr string) (func(), error) {
+func StartPubSubProxyServer(pubsub p2ptypes.PubSub, p2pConfig *config.P2PConfig, addr string) (func(), error) {
 	// Create TLS credentials for the test server using the provided config
 	// tlsCreds, err := p2p.NewPeerAuthenticator(
 	// 	zap.NewNop(),
@@ -197,7 +233,7 @@ func StartPubSubProxyServer(mockPubSub *MockPubSub, p2pConfig *config.P2PConfig,
 	// TODO revert this
 	// server := grpc.NewServer(grpc.Creds(tlsCreds))
 	server := grpc.NewServer()
-	proxyServer := rpc.NewPubSubProxyServer(mockPubSub, zap.NewNop())
+	proxyServer := rpc.NewPubSubProxyServer(pubsub, zap.NewNop())
 	protobufs.RegisterPubSubProxyServer(server, proxyServer)
 
 	// Start server
