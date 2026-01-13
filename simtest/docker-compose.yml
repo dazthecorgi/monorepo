@@ -20,27 +20,27 @@ networks:
 
 services:
   # Bootstrap node - starts first and provides initial peer discovery
-  bootstrap:
+  proxy:
     build:
       context: ..
-      dockerfile: Dockerfile.source
+      dockerfile: ./simtest/proxy/Dockerfile
       args:
         TARGETOS: linux
         TARGETARCH: ${TARGETARCH:-arm64}
-    image: quilibrium-simtest:latest
-    hostname: bootstrap
-    command: ["--dht-only", "--network=1"]
+    image: quilibrium-proxy:latest
+    hostname: proxy
+    command: ["--network=1", "--config=/root/config"]
     networks:
       quilibrium-isolated:
         ipv4_address: 172.28.0.10
     extra_hosts:
-      - "bootstrap.local:172.28.0.10"
+      - "proxy.local:172.28.0.10"
     environment:
       - QUILIBRIUM_SIGNATURE_CHECK=false
     volumes:
-      - ./config/bootstrap-config/:/root/.config
+      - ./config/proxy-config/:/root/config
     healthcheck:
-      test: ["CMD", "p2p-ping", "-timeout", "5s", "/dns/bootstrap.local/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc"]
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/dns/proxy.local/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -52,7 +52,7 @@ services:
         max-size: 100m
 
   # Archive nodes
-  # These nodes will use the bootstrap node for peer discovery
+  # These nodes will use the proxy node for peer discovery
   # Ideally we would template this to avoid duplication, but getting the index to match the config is tricky
   # https://stackoverflow.com/a/64799824
   archive-1:
@@ -62,14 +62,14 @@ services:
       args:
         TARGETOS: linux
         TARGETARCH: ${TARGETARCH:-arm64}
-    image: quilibrium-simtest:latest
+    image: quilibrium-node:latest
     networks:
       - quilibrium-isolated
     extra_hosts:
-      - "bootstrap.local:172.28.0.10"
+      - "proxy.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
-      bootstrap:
+      proxy:
         condition: service_healthy
     volumes:
        - ./config/archive-1-config:/root/config
@@ -92,14 +92,14 @@ services:
       args:
         TARGETOS: linux
         TARGETARCH: ${TARGETARCH:-arm64}
-    image: quilibrium-simtest:latest
+    image: quilibrium-node:latest
     networks:
       - quilibrium-isolated
     extra_hosts:
-      - "bootstrap.local:172.28.0.10"
+      - "proxy.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
-      bootstrap:
+      proxy:
         condition: service_healthy
     volumes:
        - ./config/archive-2-config:/root/config
@@ -122,14 +122,14 @@ services:
       args:
         TARGETOS: linux
         TARGETARCH: ${TARGETARCH:-arm64}
-    image: quilibrium-simtest:latest
+    image: quilibrium-node:latest
     networks:
       - quilibrium-isolated
     extra_hosts:
-      - "bootstrap.local:172.28.0.10"
+      - "proxy.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
-      bootstrap:
+      proxy:
         condition: service_healthy
     volumes:
        - ./config/archive-3-config:/root/config
@@ -152,14 +152,14 @@ services:
       args:
         TARGETOS: linux
         TARGETARCH: ${TARGETARCH:-arm64}
-    image: quilibrium-simtest:latest
+    image: quilibrium-node:latest
     networks:
       - quilibrium-isolated
     extra_hosts:
-      - "bootstrap.local:172.28.0.10"
+      - "proxy.local:172.28.0.10"
     command: ["--network=1", "--signature-check=false", "--config=/root/config"]
     depends_on:
-      bootstrap:
+      proxy:
         condition: service_healthy
     volumes:
        - ./config/archive-4-config:/root/config

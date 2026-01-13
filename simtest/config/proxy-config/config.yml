@@ -38,7 +38,7 @@ p2p:
   iDontWantMessageTTL: 0
   bootstrapPeers:
   # self multiaddr for bootstrap node
-  - /dns/bootstrap.local/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc
+  - /dns/proxy.local/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc
   listenMultiaddr: /ip4/0.0.0.0/udp/8336/quic-v1
   streamListenMultiaddr: ""
   peerPrivKey: 4ee2b6a8ab83db96df43b1c5b0239ce3077fa14e77b23bb6b3ade66e50d4c7e1136478938e868439d2266d800c9cbd472ced584db4a651d8fdf18ebbc46deecb7007a316da06a22246cef854e241c33f295841d1e352b9c182d0b5057fac09e26c99b31dd19f80a6cc014e3b855bbabd8e80
