@@ -215,6 +215,14 @@ func main() {
 		log.Fatal("failed to load config", err)
 	}
 
+	if archiveMode := os.Getenv("DEFAULT_ARCHIVE_MODE"); archiveMode == "true" {
+		nodeConfig.Engine.ArchiveMode = true
+	}
+
+	if bootstrapPeer := os.Getenv("DEFAULT_BOOTSTRAP_PEER"); bootstrapPeer != "" {
+		nodeConfig.P2P.BootstrapPeers = []string{bootstrapPeer}
+	}
+
 	if *dbConsole {
 		db, err := app.NewDBConsole(nodeConfig)
 		if err != nil {

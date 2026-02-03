@@ -4,7 +4,7 @@ Each project in the repository has an accompanying ./test.sh script. Ensure you
 have the requisite dependencies installed, instructions available in the
 README.md file.
 
-## Dependency tests
+## Rust dependency tests
 
 The supporting libraries linking rust crates to go will perform native tests,
 and must be run with ./test.sh to handle the required links:
@@ -58,3 +58,9 @@ running tests, run with the following:
 
 Please note, these tests take hours to run, and are computationally expensive.
 
+### Rebuilding all Rust dependencies
+
+The following script can be used to rebuild all the Rust dependencies used by the 
+node and qclient. From the repo root:
+
+    ./scripts/build-rust-crates.sh

@@ -5,7 +5,7 @@ FROM --platform=${TARGETPLATFORM} ubuntu:24.04 AS base
 ENV PATH="${PATH}:/root/.cargo/bin/"
 ARG TARGETOS
 ARG TARGETARCH
-ARG GO_VERSION=1.23.5
+ARG GO_VERSION=1.24.9
 
 # Install basics
 RUN apt-get update && apt-get install -y \
@@ -207,6 +207,14 @@ COPY --from=gen-bulletproofs /opt/ceremonyclient/bulletproofs /opt/ceremonyclien
 COPY --from=gen-bulletproofs /opt/ceremonyclient/target/release/libbulletproofs.a /opt/ceremonyclient/target/release/libbulletproofs.a
 
 # -----------------------------------------------------------------------------
+# Stage: build-p2p-ping
+# -----------------------------------------------------------------------------
+FROM common-context AS build-p2p-ping
+COPY ./node /opt/ceremonyclient/node
+WORKDIR /opt/ceremonyclient/go-libp2p/examples/p2p-ping
+RUN go build -o /usr/bin/p2p-ping .
+
+# -----------------------------------------------------------------------------
 # Stage: build-node
 # -----------------------------------------------------------------------------
 FROM build-context AS build-node
@@ -229,9 +237,9 @@ COPY ./client /opt/ceremonyclient/client
 WORKDIR /opt/ceremonyclient/client
 RUN go mod download
 
-ARG BINARIES_DIR=/opt/ceremonyclient/target/release
-RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} ./build.sh -o qclient
-RUN cp qclient /usr/bin
+# ARG BINARIES_DIR=/opt/ceremonyclient/target/release
+# RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} ./build.sh -o qclient
+# RUN cp qclient /usr/bin
 
 # -----------------------------------------------------------------------------
 # Stage: node-only
@@ -275,9 +283,9 @@ FROM scratch AS qclient-unix
 COPY --from=build-qclient /usr/bin/qclient /qclient
 ENTRYPOINT [ "/qclient" ]
 
-FROM qclient-unix AS qclient-linux
-FROM qclient-unix AS qclient-darwin
-FROM qclient-${TARGETOS} AS qclient
+# FROM qclient-unix AS qclient-linux
+# FROM qclient-unix AS qclient-darwin
+# FROM qclient-${TARGETOS} AS qclient
 
 # -----------------------------------------------------------------------------
 # Stage: final (Default combined image)
@@ -307,7 +315,9 @@ LABEL org.opencontainers.image.ref.name=$GIT_BRANCH
 LABEL org.opencontainers.image.revision=$GIT_COMMIT
 
 COPY --from=build-node /usr/bin/node /usr/local/bin
-COPY --from=build-qclient /opt/ceremonyclient/client/qclient /usr/local/bin
+COPY --from=common-context /root/go/bin/grpcurl /usr/local/bin/grpcurl
+COPY --from=build-p2p-ping /usr/bin/p2p-ping /usr/local/bin/p2p-ping
+# COPY --from=build-qclient /opt/ceremonyclient/client/qclient /usr/local/bin
 
 WORKDIR /root
 ENTRYPOINT ["node"]

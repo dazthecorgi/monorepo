@@ -1,0 +1,176 @@
+name: quilibrium-simtest
+
+# Docker Compose configuration for running 4 Quilibrium archive nodes in an isolated network
+# 
+# Usage:
+#   1. Start the nodes: docker compose up -d --build --remove-orphans
+#   2. View logs: docker compose logs -f
+#   5. Clean up: docker compose down -v
+#
+# Environment variables:
+#   TARGETARCH: Target architecture (default: arm64)
+
+networks:
+  quilibrium-isolated:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+services:
+  # Bootstrap node - starts first and provides initial peer discovery
+  proxy:
+    build:
+      context: ..
+      dockerfile: ./simtest/proxy/Dockerfile
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-proxy:latest
+    hostname: proxy
+    command: ["--network=1", "--config=/root/config"]
+    networks:
+      quilibrium-isolated:
+        ipv4_address: 172.28.0.10
+    extra_hosts:
+      - "proxy.local:172.28.0.10"
+    environment:
+      - QUILIBRIUM_SIGNATURE_CHECK=false
+    volumes:
+      - ./config/proxy-config/:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/dns/proxy.local/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  # Archive nodes
+  # These nodes will use the proxy node for peer discovery
+  # Ideally we would template this to avoid duplication, but getting the index to match the config is tricky
+  # https://stackoverflow.com/a/64799824
+  archive-1:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - quilibrium-isolated
+    extra_hosts:
+      - "proxy.local:172.28.0.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-1-config:/root/config
+    healthcheck:
+      test: ["CMD", "grpcurl", "-plaintext", "localhost:8337", "list", "quilibrium.node.node.pb.NodeService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  archive-2:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - quilibrium-isolated
+    extra_hosts:
+      - "proxy.local:172.28.0.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-2-config:/root/config
+    healthcheck:
+      test: ["CMD", "grpcurl", "-plaintext", "localhost:8337", "list", "quilibrium.node.node.pb.NodeService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  archive-3:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - quilibrium-isolated
+    extra_hosts:
+      - "proxy.local:172.28.0.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-3-config:/root/config
+    healthcheck:
+      test: ["CMD", "grpcurl", "-plaintext", "localhost:8337", "list", "quilibrium.node.node.pb.NodeService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  archive-4:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - quilibrium-isolated
+    extra_hosts:
+      - "proxy.local:172.28.0.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-4-config:/root/config
+    healthcheck:
+      test: ["CMD", "grpcurl", "-plaintext", "localhost:8337", "list", "quilibrium.node.node.pb.NodeService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m

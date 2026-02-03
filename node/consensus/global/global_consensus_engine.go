@@ -3813,6 +3813,7 @@ func (e *GlobalConsensusEngine) OnCurrentRankDetails(
 	e.logger.Info(
 		"entered new rank",
 		zap.Uint64("current_rank", currentRank),
+		zap.Uint64("finalized_rank", finalizedRank),
 		zap.String("current_leader", hex.EncodeToString([]byte(currentLeader))),
 	)
 }
