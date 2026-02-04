@@ -34,6 +34,12 @@ import (
 	up2p "source.quilibrium.com/quilibrium/monorepo/utils/p2p"
 )
 
+var GLOBAL_CONSENSUS_BITMASK = []byte{0x00}
+var GLOBAL_FRAME_BITMASK = []byte{0x00, 0x00}
+var GLOBAL_PROVER_BITMASK = []byte{0x00, 0x00, 0x00}
+var GLOBAL_PEER_INFO_BITMASK = []byte{0x00, 0x00, 0x00, 0x00}
+var GLOBAL_ALERT_BITMASK = bytes.Repeat([]byte{0x00}, 16)
+
 const (
 	DecayInterval = 10 * time.Minute
 	AppDecay      = .9
@@ -85,9 +91,9 @@ func NewBlossomSub(
 ) *BlossomSub {
 	ctx := context.Background()
 
-    logger = logger.With(zap.String("process", "master"))
-    // For main node (coreId == 0), use the standard p2pConfig.ListenMultiaddr
-    listenAddr := p2pConfig.ListenMultiaddr
+	logger = logger.With(zap.String("process", "master"))
+	// For main node (coreId == 0), use the standard p2pConfig.ListenMultiaddr
+	listenAddr := p2pConfig.ListenMultiaddr
 
 	opts := []libp2pconfig.Option{
 		libp2p.ListenAddrStrings(listenAddr),
@@ -97,22 +103,22 @@ func NewBlossomSub(
 
 	isBootstrapPeer := true
 
-    peerPrivKey, err := hex.DecodeString(p2pConfig.PeerPrivKey)
-    if err != nil {
-        logger.Panic("error unmarshaling peerkey", zap.Error(err))
-    }
+	peerPrivKey, err := hex.DecodeString(p2pConfig.PeerPrivKey)
+	if err != nil {
+		logger.Panic("error unmarshaling peerkey", zap.Error(err))
+	}
 
-    privKey, err := crypto.UnmarshalEd448PrivateKey(peerPrivKey)
-    if err != nil {
-        logger.Panic("error unmarshaling peerkey", zap.Error(err))
-    }
+	privKey, err := crypto.UnmarshalEd448PrivateKey(peerPrivKey)
+	if err != nil {
+		logger.Panic("error unmarshaling peerkey", zap.Error(err))
+	}
 
-    derivedPeerId, err := peer.IDFromPrivateKey(privKey)
-    if err != nil {
-        logger.Panic("error deriving peer id", zap.Error(err))
-    }
+	derivedPeerId, err := peer.IDFromPrivateKey(privKey)
+	if err != nil {
+		logger.Panic("error deriving peer id", zap.Error(err))
+	}
 
-    opts = append(opts, libp2p.Identity(privKey))
+	opts = append(opts, libp2p.Identity(privKey))
 
 	opts = append(
 		opts,
@@ -140,7 +146,7 @@ func NewBlossomSub(
 	}
 	logger.Info("established peer id", zap.String("peer_id", h.ID().String()))
 
-    bootstrappers := make([]peer.AddrInfo, 0)
+	bootstrappers := make([]peer.AddrInfo, 0)
 
 	kademliaDHT := initDHT(
 		ctx,
@@ -717,6 +723,120 @@ func (b *BlossomSub) Close() error {
 	}
 	b.subscriptions = nil
 	b.subscriptionMutex.Unlock()
+
+	return nil
+}
+
+func (b *BlossomSub) SubscribeToAllMessages() error {
+	if err := b.subscribeToGlobalConsensus(); err != nil {
+		return errors.Wrap(err, "subscribe to global consensus")
+	}
+	if err := b.subscribeToFrameMessages(); err != nil {
+		return errors.Wrap(err, "subscribe to frame messages")
+	}
+	if err := b.subscribeToProverMessages(); err != nil {
+		return errors.Wrap(err, "subscribe to prover messages")
+	}
+	if err := b.subscribeToPeerInfoMessages(); err != nil {
+		return errors.Wrap(err, "subscribe to peer info messages")
+	}
+	if err := b.subscribeToAlertMessages(); err != nil {
+		return errors.Wrap(err, "subscribe to alert messages")
+	}
+	return nil
+}
+
+func (b *BlossomSub) subscribeToGlobalConsensus() error {
+	if err := b.Subscribe(
+		GLOBAL_CONSENSUS_BITMASK,
+		func(message *pb.Message) error {
+			select {
+			case <-b.ctx.Done():
+				return nil
+			default:
+				b.logger.Info("received global consensus message")
+				return nil
+			}
+		},
+	); err != nil {
+		return errors.Wrap(err, "subscribe to global consensus")
+	}
+
+	return nil
+}
+
+func (b *BlossomSub) subscribeToFrameMessages() error {
+	if err := b.Subscribe(
+		GLOBAL_FRAME_BITMASK,
+		func(message *pb.Message) error {
+			select {
+			case <-b.ctx.Done():
+				return nil
+			default:
+				b.logger.Info("received global frame message")
+				return nil
+			}
+		},
+	); err != nil {
+		return errors.Wrap(err, "subscribe to frame messages")
+	}
+
+	return nil
+}
+
+func (b *BlossomSub) subscribeToProverMessages() error {
+	if err := b.Subscribe(
+		GLOBAL_PROVER_BITMASK,
+		func(message *pb.Message) error {
+			select {
+			case <-b.ctx.Done():
+				return nil
+			default:
+				b.logger.Info("received global prover message")
+				return nil
+			}
+		},
+	); err != nil {
+		return errors.Wrap(err, "subscribe to prover messages")
+	}
+
+	return nil
+}
+
+func (b *BlossomSub) subscribeToPeerInfoMessages() error {
+	if err := b.Subscribe(
+		GLOBAL_PEER_INFO_BITMASK,
+		func(message *pb.Message) error {
+			select {
+			case <-b.ctx.Done():
+				return nil
+			default:
+				b.logger.Info("received peer info message")
+				return nil
+			}
+		},
+	); err != nil {
+		return errors.Wrap(err, "subscribe to peer info messages")
+	}
+
+	return nil
+}
+
+func (b *BlossomSub) subscribeToAlertMessages() error {
+	if err := b.Subscribe(
+		GLOBAL_ALERT_BITMASK,
+		func(message *pb.Message) error {
+			select {
+			case <-b.ctx.Done():
+				return nil
+			default:
+				b.logger.Info("received global alert message")
+				return nil
+			}
+		},
+	); err != nil {
+		return errors.Wrap(err, "subscribe to alert messages")
+	}
 
 	return nil
 }

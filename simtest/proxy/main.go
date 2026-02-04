@@ -53,6 +53,10 @@ func main() {
 
 	blossomSub := p2p.NewBlossomSub(nodeConfig.P2P, nodeConfig.Engine, logger, 0, p2p.ConfigDir(*configDirectory))
 
+	if err := blossomSub.SubscribeToAllMessages(); err != nil {
+		logger.Fatal("failed to subscribe to all messages", zap.Error(err))
+	}
+
 	logger.Info("DHT node running. Press Ctrl+C to stop.")
 
 	<-done
