@@ -54,7 +54,7 @@ type appScore struct {
 	score  float64
 }
 
-type BlossomSub struct {
+type BlossomSubProxy struct {
 	ps            *blossomsub.PubSub
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -74,25 +74,22 @@ type BlossomSub struct {
 	manualReachability  atomic.Pointer[bool]
 	p2pConfig           config.P2PConfig
 	dht                 *dht.IpfsDHT
-	coreId              uint
 	configDir           ConfigDir
+	globalFrameChan     chan<- *protobufs.GlobalFrame
 }
 
 var ErrNoPeersAvailable = errors.New("no peers available")
 
-var ANNOUNCE_PREFIX = "quilibrium-2.0.2-dusk-"
-
-func NewBlossomSub(
+func NewBlossomSubProxy(
+	ctx context.Context,
 	p2pConfig *config.P2PConfig,
 	engineConfig *config.EngineConfig,
 	logger *zap.Logger,
-	coreId uint,
 	configDir ConfigDir,
-) *BlossomSub {
-	ctx := context.Background()
+	globalFrameChan chan<- *protobufs.GlobalFrame,
+) *BlossomSubProxy {
 
 	logger = logger.With(zap.String("process", "master"))
-	// For main node (coreId == 0), use the standard p2pConfig.ListenMultiaddr
 	listenAddr := p2pConfig.ListenMultiaddr
 
 	opts := []libp2pconfig.Option{
@@ -126,7 +123,7 @@ func NewBlossomSub(
 	)
 
 	ctx, cancel := context.WithCancel(ctx)
-	bs := &BlossomSub{
+	bs := &BlossomSubProxy{
 		ctx:                 ctx,
 		cancel:              cancel,
 		logger:              logger,
@@ -136,8 +133,8 @@ func NewBlossomSub(
 		peerScore:           make(map[string]*appScore),
 		p2pConfig:           *p2pConfig,
 		derivedPeerID:       derivedPeerId,
-		coreId:              coreId,
 		configDir:           configDir,
+		globalFrameChan:     globalFrameChan,
 	}
 
 	h, err := libp2p.New(opts...)
@@ -211,7 +208,7 @@ func NewBlossomSub(
 	return bs
 }
 
-func (b *BlossomSub) background(ctx context.Context) {
+func (b *BlossomSubProxy) background(ctx context.Context) {
 	refreshScores := time.NewTicker(DecayInterval)
 	defer refreshScores.Stop()
 
@@ -225,7 +222,7 @@ func (b *BlossomSub) background(ctx context.Context) {
 	}
 }
 
-func (b *BlossomSub) refreshScores() {
+func (b *BlossomSubProxy) refreshScores() {
 	b.peerScoreMx.Lock()
 
 	now := time.Now()
@@ -244,7 +241,7 @@ func (b *BlossomSub) refreshScores() {
 	b.peerScoreMx.Unlock()
 }
 
-func (b *BlossomSub) PublishToBitmask(bitmask []byte, data []byte) error {
+func (b *BlossomSubProxy) PublishToBitmask(bitmask []byte, data []byte) error {
 	err := b.ps.Publish(
 		b.ctx,
 		bitmask,
@@ -263,12 +260,12 @@ func (b *BlossomSub) PublishToBitmask(bitmask []byte, data []byte) error {
 	)
 }
 
-func (b *BlossomSub) Publish(address []byte, data []byte) error {
+func (b *BlossomSubProxy) Publish(address []byte, data []byte) error {
 	bitmask := up2p.GetBloomFilter(address, 256, 3)
 	return b.PublishToBitmask(bitmask, data)
 }
 
-func (b *BlossomSub) Subscribe(
+func (b *BlossomSubProxy) Subscribe(
 	bitmask []byte,
 	handler func(message *pb.Message) error,
 ) error {
@@ -355,7 +352,7 @@ func (b *BlossomSub) Subscribe(
 
 // subscribeHandler processes a single message from the subscription.
 // Returns true if the loop should continue, false if it should exit.
-func (b *BlossomSub) subscribeHandler(
+func (b *BlossomSubProxy) subscribeHandler(
 	sub *blossomsub.Subscription,
 	copiedBitmask []byte,
 	exact bool,
@@ -392,7 +389,7 @@ func (b *BlossomSub) subscribeHandler(
 	return true
 }
 
-func (b *BlossomSub) Unsubscribe(bitmask []byte, raw bool) {
+func (b *BlossomSubProxy) Unsubscribe(bitmask []byte, raw bool) {
 	b.subscriptionMutex.Lock()
 	defer b.subscriptionMutex.Unlock()
 
@@ -456,7 +453,7 @@ func (b *BlossomSub) Unsubscribe(bitmask []byte, raw bool) {
 	delete(b.subscriptionTracker, bitmaskKey)
 }
 
-func (b *BlossomSub) RegisterValidator(
+func (b *BlossomSubProxy) RegisterValidator(
 	bitmask []byte,
 	validator func(peerID peer.ID, message *pb.Message) p2p.ValidationResult,
 	sync bool,
@@ -483,15 +480,15 @@ func (b *BlossomSub) RegisterValidator(
 	)
 }
 
-func (b *BlossomSub) UnregisterValidator(bitmask []byte) error {
+func (b *BlossomSubProxy) UnregisterValidator(bitmask []byte) error {
 	return b.ps.UnregisterBitmaskValidator(bitmask)
 }
 
-func (b *BlossomSub) GetPeerID() []byte {
+func (b *BlossomSubProxy) GetPeerID() []byte {
 	return []byte(b.derivedPeerID)
 }
 
-func (b *BlossomSub) GetRandomPeer(bitmask []byte) ([]byte, error) {
+func (b *BlossomSubProxy) GetRandomPeer(bitmask []byte) ([]byte, error) {
 	peers := b.ps.ListPeers(bitmask)
 	if len(peers) == 0 {
 		return nil, errors.Wrap(
@@ -508,13 +505,13 @@ func (b *BlossomSub) GetRandomPeer(bitmask []byte) ([]byte, error) {
 	return []byte(peers[sel.Int64()]), nil
 }
 
-func (b *BlossomSub) IsPeerConnected(peerId []byte) bool {
+func (b *BlossomSubProxy) IsPeerConnected(peerId []byte) bool {
 	peerID := peer.ID(peerId)
 	connectedness := b.h.Network().Connectedness(peerID)
 	return connectedness == network.Connected || connectedness == network.Limited
 }
 
-func (b *BlossomSub) Reachability() *wrapperspb.BoolValue {
+func (b *BlossomSubProxy) Reachability() *wrapperspb.BoolValue {
 	if manual := b.manualReachability.Load(); manual != nil {
 		return wrapperspb.Bool(*manual)
 	}
@@ -562,7 +559,7 @@ func initDHT(
 	return kademliaDHT
 }
 
-func (b *BlossomSub) Reconnect(peerId []byte) error {
+func (b *BlossomSubProxy) Reconnect(peerId []byte) error {
 	peer := peer.ID(peerId)
 	info := b.h.Peerstore().PeerInfo(peer)
 	b.h.ConnManager().Unprotect(info.ID, "bootstrap")
@@ -575,15 +572,15 @@ func (b *BlossomSub) Reconnect(peerId []byte) error {
 	return nil
 }
 
-func (b *BlossomSub) Bootstrap(ctx context.Context) error {
+func (b *BlossomSubProxy) Bootstrap(ctx context.Context) error {
 	return errors.New("bootstrap not implemented")
 }
 
-func (b *BlossomSub) DiscoverPeers(ctx context.Context) error {
+func (b *BlossomSubProxy) DiscoverPeers(ctx context.Context) error {
 	return errors.New("peer discovery not implemented")
 }
 
-func (b *BlossomSub) GetPeerScore(peerId []byte) int64 {
+func (b *BlossomSubProxy) GetPeerScore(peerId []byte) int64 {
 	b.peerScoreMx.Lock()
 	peerScore, ok := b.peerScore[string(peerId)]
 	if !ok {
@@ -595,7 +592,7 @@ func (b *BlossomSub) GetPeerScore(peerId []byte) int64 {
 	return int64(score)
 }
 
-func (b *BlossomSub) SetPeerScore(peerId []byte, score int64) {
+func (b *BlossomSubProxy) SetPeerScore(peerId []byte, score int64) {
 	b.peerScoreMx.Lock()
 	b.peerScore[string(peerId)] = &appScore{
 		score:  float64(score),
@@ -604,7 +601,7 @@ func (b *BlossomSub) SetPeerScore(peerId []byte, score int64) {
 	b.peerScoreMx.Unlock()
 }
 
-func (b *BlossomSub) AddPeerScore(peerId []byte, scoreDelta int64) {
+func (b *BlossomSubProxy) AddPeerScore(peerId []byte, scoreDelta int64) {
 	b.peerScoreMx.Lock()
 	if _, ok := b.peerScore[string(peerId)]; !ok {
 		b.peerScore[string(peerId)] = &appScore{
@@ -620,11 +617,11 @@ func (b *BlossomSub) AddPeerScore(peerId []byte, scoreDelta int64) {
 	b.peerScoreMx.Unlock()
 }
 
-func (b *BlossomSub) GetPeerstoreCount() int {
+func (b *BlossomSubProxy) GetPeerstoreCount() int {
 	return len(b.h.Peerstore().Peers())
 }
 
-func (b *BlossomSub) GetNetworkInfo() *protobufs.NetworkInfoResponse {
+func (b *BlossomSubProxy) GetNetworkInfo() *protobufs.NetworkInfoResponse {
 	resp := &protobufs.NetworkInfoResponse{}
 	for _, p := range b.h.Network().Peers() {
 		addrs := b.h.Peerstore().Addrs(p)
@@ -641,18 +638,18 @@ func (b *BlossomSub) GetNetworkInfo() *protobufs.NetworkInfoResponse {
 	return resp
 }
 
-func (b *BlossomSub) GetNetworkPeersCount() int {
+func (b *BlossomSubProxy) GetNetworkPeersCount() int {
 	return len(b.h.Network().Peers())
 }
 
-func (b *BlossomSub) GetMultiaddrOfPeerStream(
+func (b *BlossomSubProxy) GetMultiaddrOfPeerStream(
 	ctx context.Context,
 	peerId []byte,
 ) <-chan ma.Multiaddr {
 	return b.h.Peerstore().AddrStream(ctx, peer.ID(peerId))
 }
 
-func (b *BlossomSub) GetMultiaddrOfPeer(peerId []byte) string {
+func (b *BlossomSubProxy) GetMultiaddrOfPeer(peerId []byte) string {
 	addrs := b.h.Peerstore().Addrs(peer.ID(peerId))
 	if len(addrs) == 0 {
 		return ""
@@ -661,12 +658,12 @@ func (b *BlossomSub) GetMultiaddrOfPeer(peerId []byte) string {
 	return addrs[0].String()
 }
 
-func (b *BlossomSub) GetPublicKey() []byte {
+func (b *BlossomSubProxy) GetPublicKey() []byte {
 	pub, _ := b.signKey.GetPublic().Raw()
 	return pub
 }
 
-func (b *BlossomSub) SignMessage(msg []byte) ([]byte, error) {
+func (b *BlossomSubProxy) SignMessage(msg []byte) ([]byte, error) {
 	sig, err := b.signKey.Sign(msg)
 	return sig, errors.Wrap(err, "sign message")
 }
@@ -710,7 +707,7 @@ func toBlossomSubParams(
 }
 
 // Close implements p2p.PubSub.
-func (b *BlossomSub) Close() error {
+func (b *BlossomSubProxy) Close() error {
 	// Cancel context to signal all subscription goroutines to exit
 	if b.cancel != nil {
 		b.cancel()
@@ -727,7 +724,7 @@ func (b *BlossomSub) Close() error {
 	return nil
 }
 
-func (b *BlossomSub) SubscribeToAllMessages() error {
+func (b *BlossomSubProxy) SubscribeToAllMessages() error {
 	if err := b.subscribeToGlobalConsensus(); err != nil {
 		return errors.Wrap(err, "subscribe to global consensus")
 	}
@@ -746,7 +743,7 @@ func (b *BlossomSub) SubscribeToAllMessages() error {
 	return nil
 }
 
-func (b *BlossomSub) subscribeToGlobalConsensus() error {
+func (b *BlossomSubProxy) subscribeToGlobalConsensus() error {
 	if err := b.Subscribe(
 		GLOBAL_CONSENSUS_BITMASK,
 		func(message *pb.Message) error {
@@ -765,7 +762,7 @@ func (b *BlossomSub) subscribeToGlobalConsensus() error {
 	return nil
 }
 
-func (b *BlossomSub) subscribeToFrameMessages() error {
+func (b *BlossomSubProxy) subscribeToFrameMessages() error {
 	if err := b.Subscribe(
 		GLOBAL_FRAME_BITMASK,
 		func(message *pb.Message) error {
@@ -773,7 +770,25 @@ func (b *BlossomSub) subscribeToFrameMessages() error {
 			case <-b.ctx.Done():
 				return nil
 			default:
-				b.logger.Info("received global frame message")
+				frame := &protobufs.GlobalFrame{}
+				if err := frame.FromCanonicalBytes(message.Data); err != nil {
+					b.logger.Error("failed to decode global frame", zap.Error(err))
+					return nil
+				}
+				b.logger.Info(
+					"received global frame message",
+					zap.Uint64("frame_number", frame.Header.FrameNumber),
+					zap.Uint64("rank", frame.Header.Rank),
+					zap.String("prover", hex.EncodeToString(frame.Header.Prover)),
+				)
+
+				// Push the frame to the channel
+				select {
+				case b.globalFrameChan <- frame:
+				case <-b.ctx.Done():
+					return nil
+				}
+
 				return nil
 			}
 		},
@@ -784,7 +799,7 @@ func (b *BlossomSub) subscribeToFrameMessages() error {
 	return nil
 }
 
-func (b *BlossomSub) subscribeToProverMessages() error {
+func (b *BlossomSubProxy) subscribeToProverMessages() error {
 	if err := b.Subscribe(
 		GLOBAL_PROVER_BITMASK,
 		func(message *pb.Message) error {
@@ -803,7 +818,7 @@ func (b *BlossomSub) subscribeToProverMessages() error {
 	return nil
 }
 
-func (b *BlossomSub) subscribeToPeerInfoMessages() error {
+func (b *BlossomSubProxy) subscribeToPeerInfoMessages() error {
 	if err := b.Subscribe(
 		GLOBAL_PEER_INFO_BITMASK,
 		func(message *pb.Message) error {
@@ -822,7 +837,7 @@ func (b *BlossomSub) subscribeToPeerInfoMessages() error {
 	return nil
 }
 
-func (b *BlossomSub) subscribeToAlertMessages() error {
+func (b *BlossomSubProxy) subscribeToAlertMessages() error {
 	if err := b.Subscribe(
 		GLOBAL_ALERT_BITMASK,
 		func(message *pb.Message) error {

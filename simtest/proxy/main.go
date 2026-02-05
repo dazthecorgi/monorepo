@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"source.quilibrium.com/quilibrium/monorepo/config"
+	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
 )
 
@@ -26,8 +28,17 @@ var network = flag.Uint(
 	"sets the active network for the node (mainnet = 0, primary testnet = 1)",
 )
 
+var stopFrame = flag.Uint(
+	"stopFrame",
+	10,
+	"sets the maximum frame number to reach before shutting down",
+)
+
 func main() {
 	flag.Parse()
+
+	ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
 
 	// Set up logger
 	logConfig := zap.NewDevelopmentConfig()
@@ -51,7 +62,8 @@ func main() {
 
 	logger.Info("Starting DHT-only node...")
 
-	blossomSub := p2p.NewBlossomSub(nodeConfig.P2P, nodeConfig.Engine, logger, 0, p2p.ConfigDir(*configDirectory))
+	globalFrameChan := make(chan *protobufs.GlobalFrame, 100)
+	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan)
 
 	if err := blossomSub.SubscribeToAllMessages(); err != nil {
 		logger.Fatal("failed to subscribe to all messages", zap.Error(err))
@@ -59,8 +71,25 @@ func main() {
 
 	logger.Info("DHT node running. Press Ctrl+C to stop.")
 
-	<-done
+	// Monitor global frames for frame number 10
+	go func() {
+		for frame := range globalFrameChan {
+			if frame.Header.FrameNumber == uint64(*stopFrame) {
+				logger.Info("Received terminal frame number, shutting down ", zap.Uint64("frame_number", frame.Header.FrameNumber))
+				cancel()
+				return
+			}
+		}
+	}()
+
+	select {
+    case <-done:
+        logger.Info("Received interrupt signal")
+    case <-ctx.Done():
+        logger.Info("Regular shutdown initiated")
+    }
 
 	logger.Info("Shutting down DHT node...")
 	blossomSub.Close()
+	os.Exit(0)
 }
