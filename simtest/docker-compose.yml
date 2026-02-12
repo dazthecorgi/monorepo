@@ -1,0 +1,206 @@
+name: quilibrium-simtest
+
+# Docker Compose configuration for running 4 Quilibrium archive nodes in an isolated network
+# 
+# Usage:
+#   1. Start the nodes: docker compose up -d --build --remove-orphans
+#   2. View logs: docker compose logs -f
+#   5. Clean up: docker compose down -v
+#
+# Environment variables:
+#   TARGETARCH: Target architecture (default: arm64)
+
+networks:
+  proxy-network:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+  archive-1-network:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24
+  archive-2-network:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.2.0/24
+  archive-3-network:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.3.0/24
+  archive-4-network:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.4.0/24
+
+services:
+  # Bootstrap node - starts first and provides initial peer discovery
+  proxy:
+    build:
+      context: ..
+      dockerfile: ./simtest/proxy/Dockerfile
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-proxy:latest
+    hostname: proxy
+    command: ["--network=1", "--config=/root/config"]
+    networks:
+      proxy-network:
+        ipv4_address: 172.28.0.10
+      archive-1-network:
+        ipv4_address: 172.28.1.10
+      archive-2-network:
+        ipv4_address: 172.28.2.10
+      archive-3-network:
+        ipv4_address: 172.28.3.10
+      archive-4-network:
+        ipv4_address: 172.28.4.10
+    extra_hosts:
+      - "proxy.local:172.28.0.10"
+    volumes:
+      - ./config/proxy-config/:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/dns/proxy.local/udp/8336/quic-v1/p2p/QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  # Archive nodes
+  # These nodes will use the proxy node for peer discovery
+  # Ideally we would template this to avoid duplication, but getting the index to match the config is tricky
+  # https://stackoverflow.com/a/64799824
+  archive-1:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - archive-1-network
+    extra_hosts:
+      - "proxy.local:172.28.1.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-1-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmUTm2VphyTw3ZxFEP5Bsmf7oEbNm9odWfWVfq2uMWE71G"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  archive-2:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - archive-2-network
+    extra_hosts:
+      - "proxy.local:172.28.2.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-2-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmabWWynnmuommyVP1cQDxrGESweGmzrG84p24uERR5sYh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  archive-3:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - archive-3-network
+    extra_hosts:
+      - "proxy.local:172.28.3.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-3-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmdgHiGSSHD25cTjfZmYCXzajhdXzPKpPC9sXRFtZgUePX"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  archive-4:
+    build:
+      context: ..
+      dockerfile: Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    networks:
+      - archive-4-network
+    extra_hosts:
+      - "proxy.local:172.28.4.10"
+    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+       - ./config/archive-4-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmRTd8oGd75wjYhoVxkffpzmmCm9MF6oqYpoXNL7n3rjGk"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
