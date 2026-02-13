@@ -44,7 +44,7 @@ type FrameNotification struct {
 	Type        NotificationType `json:"type"`
 }
 
-func notifyRunner(logger *zap.Logger, runnerAddress, authCredential, runID string, frameNumber uint64) error {
+func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64) error {
 	notification := FrameNotification{
 		RunID:       runID,
 		FrameNumber: frameNumber,
@@ -56,16 +56,16 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authCredential, runID strin
 		return fmt.Errorf("failed to marshal notification: %w", err)
 	}
 
-	url := fmt.Sprintf("http://%s/frame-notification", runnerAddress)
+	url := fmt.Sprintf("http://%s/run-notification", runnerAddress)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if authCredential != "" {
-		req.Header.Set("Authorization", authCredential)
-	}
+
+	authCredential := fmt.Sprintf("Bearer %s", authToken)
+	req.Header.Set("Authorization", authCredential)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -89,7 +89,7 @@ func main() {
 	runID := os.Getenv("RUN_ID")
 	runnerAddress := os.Getenv("RUNNER_ADDRESS")
 	stopFrameStr := os.Getenv("STOP_FRAME")
-	runnerAuthCredential := os.Getenv("RUNNER_AUTH")
+	runnerAuthToken := os.Getenv("RUNNER_AUTH")
 
 	// Validate required environment variables
 	if runID == "" {
@@ -100,7 +100,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: RUNNER_ADDRESS environment variable is required\n")
 		os.Exit(1)
 	}
-	if runnerAuthCredential == "" {
+	if runnerAuthToken == "" {
 		fmt.Fprintf(os.Stderr, "Error: RUNNER_AUTH environment variable is required\n")
 		os.Exit(1)
 	}
@@ -161,7 +161,7 @@ func main() {
 			if frame.Header.FrameNumber == stopFrame {
 				logger.Info("Received terminal frame number, shutting down ", zap.Uint64("frame_number", frame.Header.FrameNumber))
 
-				err := notifyRunner(logger, runnerAddress, runnerAuthCredential, runID, frame.Header.FrameNumber)
+				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID, frame.Header.FrameNumber)
 
 				cancel(err)
 
