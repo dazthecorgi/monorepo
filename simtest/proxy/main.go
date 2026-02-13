@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -34,11 +37,75 @@ var stopFrame = flag.Uint(
 	"sets the maximum frame number to reach before shutting down",
 )
 
+var runnerAddress = flag.String(
+	"runnerAddress",
+	"",
+	"the runner's network address (ip:port) to notify when terminal frame is reached",
+)
+
+type NotificationType string
+
+const (
+	NotificationTypeTerminalFrame NotificationType = "terminal_frame_reached"
+)
+
+type FrameNotification struct {
+	FrameNumber uint64           `json:"frame_number"`
+	Type        NotificationType `json:"type"`
+}
+
+func notifyRunner(logger *zap.Logger, runnerAddress, authCredential string, frameNumber uint64) error {
+	notification := FrameNotification{
+		FrameNumber: frameNumber,
+		Type:        NotificationTypeTerminalFrame,
+	}
+
+	jsonData, err := json.Marshal(notification)
+	if err != nil {
+		return fmt.Errorf("failed to marshal notification: %w", err)
+	}
+
+	url := fmt.Sprintf("http://%s/frame-notification", runnerAddress)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if authCredential != "" {
+		req.Header.Set("Authorization", authCredential)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send notification to runner at %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		logger.Info("Successfully notified runner", zap.Int("status_code", resp.StatusCode))
+		return nil
+	}
+
+	return fmt.Errorf("runner returned non-success status: %d", resp.StatusCode)
+}
+
 func main() {
 	flag.Parse()
 
-	ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+	// Validate required arguments
+	if *runnerAddress == "" {
+		fmt.Fprintf(os.Stderr, "Error: --runnerAddress is required\n")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Get auth credential from environment variable
+	runnerAuthCredential := os.Getenv("RUNNER_AUTH")
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+    defer cancel(nil)
 
 	// Set up logger
 	logConfig := zap.NewDevelopmentConfig()
@@ -71,12 +138,16 @@ func main() {
 
 	logger.Info("DHT node running. Press Ctrl+C to stop.")
 
-	// Monitor global frames for frame number 10
+	// Monitor global frames until they reach the specified stop frame, then notify the runner and shut down
 	go func() {
 		for frame := range globalFrameChan {
 			if frame.Header.FrameNumber == uint64(*stopFrame) {
 				logger.Info("Received terminal frame number, shutting down ", zap.Uint64("frame_number", frame.Header.FrameNumber))
-				cancel()
+
+				err := notifyRunner(logger, *runnerAddress, runnerAuthCredential, frame.Header.FrameNumber)
+
+				cancel(err)
+
 				return
 			}
 		}
@@ -88,6 +159,10 @@ func main() {
     case <-ctx.Done():
         logger.Info("Regular shutdown initiated")
     }
+
+	if cause := context.Cause(ctx); cause != nil {
+		logger.Info("Context cancelled with cause", zap.Error(cause))
+	}
 
 	logger.Info("Shutting down DHT node...")
 	blossomSub.Close()

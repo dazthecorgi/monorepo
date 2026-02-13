@@ -1,12 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-)
 
+	"github.com/testcontainers/testcontainers-go/modules/compose"
+)
 
 func main() {
 	if err := Run(); err != nil {
@@ -15,17 +16,14 @@ func main() {
 	}
 }
 
-// Run executes "docker compose up -d --build" in the directory containing docker-compose.yml
+// Run executes "docker compose up -d --build" using testcontainers compose module
 func Run() error {
-	// Get the parent directory (simtest) where docker-compose.yml is located
+	ctx := context.Background()
+
+	// Get the directory where docker-compose.yml is located
 	execDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Check if we're in the runner directory, if so go up one level
-	if filepath.Base(execDir) == "runner" {
-		execDir = filepath.Dir(execDir)
 	}
 
 	// Verify docker-compose.yml exists
@@ -34,17 +32,32 @@ func Run() error {
 		return fmt.Errorf("docker-compose.yml not found in %s", execDir)
 	}
 
-	// Create the docker compose command
-	cmd := exec.Command("docker", "compose", "up", "-d", "--build")
-	cmd.Dir = execDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Run the command
 	fmt.Printf("Running: docker compose up -d --build in %s\n", execDir)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to run docker compose: %w", err)
+
+	// Create compose stack
+	composeStack, err := compose.NewDockerCompose(composePath)
+	if err != nil {
+		return fmt.Errorf("failed to create compose stack: %w", err)
 	}
+
+	// Start all services - testcontainers will build automatically
+	err = composeStack.Up(ctx, compose.Wait(true))
+	if err != nil {
+		return fmt.Errorf("failed to run docker compose up: %w", err)
+	}
+
+	defer func() {
+        err = composeStack.Down(
+            context.Background(),
+            compose.RemoveOrphans(true),
+            compose.RemoveVolumes(true),
+        )
+        if err == nil {
+			fmt.Println("Compose stack stopped successfully")
+        } else {
+            fmt.Printf("Failed to stop compose stack: %v", err)
+		}
+    }()
 
 	fmt.Println("Docker Compose started successfully")
 	return nil
