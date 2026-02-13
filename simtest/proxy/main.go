@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -31,18 +32,6 @@ var network = flag.Uint(
 	"sets the active network for the node (mainnet = 0, primary testnet = 1)",
 )
 
-var stopFrame = flag.Uint(
-	"stopFrame",
-	10,
-	"sets the maximum frame number to reach before shutting down",
-)
-
-var runnerAddress = flag.String(
-	"runnerAddress",
-	"",
-	"the runner's network address (ip:port) to notify when terminal frame is reached",
-)
-
 type NotificationType string
 
 const (
@@ -50,12 +39,14 @@ const (
 )
 
 type FrameNotification struct {
+	RunID       string           `json:"run_id"`
 	FrameNumber uint64           `json:"frame_number"`
 	Type        NotificationType `json:"type"`
 }
 
-func notifyRunner(logger *zap.Logger, runnerAddress, authCredential string, frameNumber uint64) error {
+func notifyRunner(logger *zap.Logger, runnerAddress, authCredential, runID string, frameNumber uint64) error {
 	notification := FrameNotification{
+		RunID:       runID,
 		FrameNumber: frameNumber,
 		Type:        NotificationTypeTerminalFrame,
 	}
@@ -94,15 +85,38 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authCredential string, fram
 func main() {
 	flag.Parse()
 
-	// Validate required arguments
-	if *runnerAddress == "" {
-		fmt.Fprintf(os.Stderr, "Error: --runnerAddress is required\n")
-		flag.Usage()
+	// Read environment variables
+	runID := os.Getenv("RUN_ID")
+	runnerAddress := os.Getenv("RUNNER_ADDRESS")
+	stopFrameStr := os.Getenv("STOP_FRAME")
+	runnerAuthCredential := os.Getenv("RUNNER_AUTH")
+
+	// Validate required environment variables
+	if runID == "" {
+		fmt.Fprintf(os.Stderr, "Error: RUN_ID environment variable is required\n")
+		os.Exit(1)
+	}
+	if runnerAddress == "" {
+		fmt.Fprintf(os.Stderr, "Error: RUNNER_ADDRESS environment variable is required\n")
+		os.Exit(1)
+	}
+	if runnerAuthCredential == "" {
+		fmt.Fprintf(os.Stderr, "Error: RUNNER_AUTH environment variable is required\n")
+		os.Exit(1)
+	}
+	if stopFrameStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: STOP_FRAME environment variable is required\n")
 		os.Exit(1)
 	}
 
-	// Get auth credential from environment variable
-	runnerAuthCredential := os.Getenv("RUNNER_AUTH")
+	fmt.Printf("Run ID: %s\n", runID)
+
+	// Parse stopFrame
+	stopFrame, err := strconv.ParseUint(stopFrameStr, 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid STOP_FRAME value '%s': %v\n", stopFrameStr, err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithCancelCause(context.Background())
     defer cancel(nil)
@@ -116,6 +130,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer logger.Sync()
+
+	// Add run ID to logger context
+	logger = logger.With(zap.String("run_id", runID))
 
 	nodeConfig, err := config.LoadConfig(*configDirectory, "", false)
 	if err != nil {
@@ -141,10 +158,10 @@ func main() {
 	// Monitor global frames until they reach the specified stop frame, then notify the runner and shut down
 	go func() {
 		for frame := range globalFrameChan {
-			if frame.Header.FrameNumber == uint64(*stopFrame) {
+			if frame.Header.FrameNumber == stopFrame {
 				logger.Info("Received terminal frame number, shutting down ", zap.Uint64("frame_number", frame.Header.FrameNumber))
 
-				err := notifyRunner(logger, *runnerAddress, runnerAuthCredential, frame.Header.FrameNumber)
+				err := notifyRunner(logger, runnerAddress, runnerAuthCredential, runID, frame.Header.FrameNumber)
 
 				cancel(err)
 

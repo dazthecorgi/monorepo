@@ -1,7 +1,7 @@
 name: quilibrium-simtest
 
 # Docker Compose configuration for running 4 Quilibrium archive nodes in an isolated network
-# 
+#
 # Usage:
 #   1. Start the nodes: docker compose up -d --build --remove-orphans
 #   2. View logs: docker compose logs -f
@@ -9,6 +9,10 @@ name: quilibrium-simtest
 #
 # Environment variables:
 #   TARGETARCH: Target architecture (default: arm64)
+#   RUN_ID: Required unique identifier for this test run
+#   RUNNER_ADDRESS: Runner's network address for notifications (default: host.docker.internal:8080)
+#   STOP_FRAME: Required maximum frame number before shutdown
+#   RUNNER_AUTH: Optional authentication credential for runner notifications
 
 networks:
   proxy-network:
@@ -53,6 +57,11 @@ services:
     image: quilibrium-proxy:latest
     hostname: proxy
     command: ["--network=1", "--config=/root/config"]
+    environment:
+      - RUN_ID=${RUN_ID}
+      - RUNNER_ADDRESS=${RUNNER_ADDRESS}
+      - STOP_FRAME=${STOP_FRAME}
+      - RUNNER_AUTH=${RUNNER_AUTH}
     networks:
       proxy-network:
         ipv4_address: 172.28.0.10
