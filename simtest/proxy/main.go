@@ -109,8 +109,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Run ID: %s\n", runID)
-
 	// Parse stopFrame
 	stopFrame, err := strconv.ParseUint(stopFrameStr, 10, 64)
 	if err != nil {
@@ -133,6 +131,8 @@ func main() {
 
 	// Add run ID to logger context
 	logger = logger.With(zap.String("run_id", runID))
+
+	logger.Info("Stop frame", zap.Uint64("stop_frame", stopFrame))
 
 	nodeConfig, err := config.LoadConfig(*configDirectory, "", false)
 	if err != nil {
@@ -178,7 +178,7 @@ func main() {
     }
 
 	if cause := context.Cause(ctx); cause != nil {
-		logger.Info("Context cancelled with cause", zap.Error(cause))
+		logger.Error("Context cancelled with cause", zap.Error(cause))
 	}
 
 	logger.Info("Shutting down DHT node...")

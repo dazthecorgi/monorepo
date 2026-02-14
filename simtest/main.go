@@ -87,7 +87,7 @@ func main() {
 
 	// Start HTTP server to listen for notifications
 	mux := http.NewServeMux()
-	mux.HandleFunc("/frame-notification", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/run-notification", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -200,19 +200,21 @@ func Run(runId string, execDir string, bearerToken string) (*compose.DockerCompo
 	// Prepare environment variables for docker-compose
 	env := map[string]string{
 		"RUN_ID":         runId,
-		"RUNNER_AUTH":    fmt.Sprintf("Bearer %s", bearerToken),
-		"RUNNER_ADDRESS": "host.docker.internal" + *listenPort,
-		"STOP_FRAME":     "10", // TODO: make this configurable
+		"RUNNER_AUTH":    bearerToken,
+		"RUNNER_ADDRESS": "172.17.0.1" + *listenPort, // Gateway IP of proxy-network
+		"STOP_FRAME":     "2", // TODO: make this configurable
 	}
 
 	// Create compose stack
-	composeStack, err := compose.NewDockerCompose(composePath)
+	composeStack, err := compose.NewDockerComposeWith(compose.WithStackFiles(composePath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create compose stack: %w", err)
 	}
 
-	// Start all services - testcontainers will build automatically
-	err = composeStack.WithEnv(env).Up(ctx, compose.Wait(true))
+	// Set environment variables and start services with build
+	// testcontainers will build images automatically if they don't exist
+	// WithRecreate forces recreation of containers (similar to --force-recreate)
+	err = composeStack.WithEnv(env).Up(ctx, compose.Wait(true), compose.WithRecreate("force"), compose.WithRecreateDependencies("force"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to run docker compose up: %w", err)
 	}
