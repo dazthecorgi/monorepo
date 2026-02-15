@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -66,8 +67,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to generate bearer token: %v\n", err)
 		os.Exit(1)
 	}
-	// TODO remove this
-	fmt.Printf("Generated bearer token for runner authentication: %s\n", bearerToken)
 
 	// Get the directory where docker-compose.yml is located
 	execDir := *workingDir
@@ -107,8 +106,9 @@ func main() {
 			return
 		}
 
+		// Use constant time comparison to prevent timing attacks
 		token := strings.TrimPrefix(authHeader, bearerPrefix)
-		if token != bearerToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(bearerToken)) != 1 {
 			http.Error(w, "Invalid bearer token", http.StatusUnauthorized)
 			return
 		}
