@@ -228,3 +228,34 @@ func TestCheckSafety_DuplicateFrameIDs(t *testing.T) {
 	// Note: The current implementation may not have a specific error for this case,
 	// but it should fail in some way (likely ErrFork or other validation error)
 }
+
+func TestCheckSafety_DisjointWithCircularSequence(t *testing.T) {
+	// Create two disjoint sequences:
+	// Sequence 1 (normal chain): frame1 <- frame2 (has leaf: frame2)
+	// Sequence 2 (circular): frame3 <- frame4 <- frame5 <- frame3 (cycle, no leaf)
+	// Result: only one leaf overall (frame2), but multiple issues:
+	//   - Two disjoint sequences (frame1 is root, frame3/4/5 form isolated cycle)
+	//   - One sequence contains a cycle
+	var zero [32]byte
+
+	// Sequence 1: simple chain
+	frame1 := newMockFrame(byteArray(1), zero)          // root
+	frame2 := newMockFrame(byteArray(2), byteArray(1))  // leaf
+
+	// Sequence 2: circular (no connection to zero, forms isolated cycle)
+	frame3 := newMockFrame(byteArray(3), byteArray(5))  // parent is frame5
+	frame4 := newMockFrame(byteArray(4), byteArray(3))  // parent is frame3
+	frame5 := newMockFrame(byteArray(5), byteArray(4))  // parent is frame4 (creates cycle: 3->5->4->3)
+
+	frames := []*mockFrame{frame1, frame2, frame3, frame4, frame5}
+
+	err := CheckSafety(frames)
+	if err == nil {
+		t.Fatal("expected error for disjoint sequences with one circular, got nil")
+	}
+	// Should fail - could be either ErrFork (disjoint detection) or ErrCycle depending on check order
+	// The implementation detects ErrFork first (disconnected frames)
+	if !errors.Is(err, ErrFork) && !errors.Is(err, ErrCycle) {
+		t.Errorf("expected ErrFork or ErrCycle, got %v", err)
+	}
+}
