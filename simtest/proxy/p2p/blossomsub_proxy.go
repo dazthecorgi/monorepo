@@ -779,6 +779,8 @@ func (b *BlossomSubProxy) subscribeToFrameMessages() error {
 					"received global frame message",
 					zap.Uint64("frame_number", frame.Header.FrameNumber),
 					zap.Uint64("rank", frame.Header.Rank),
+					zap.String("identity", hex.EncodeToString([]byte(frame.Identity()))),
+					zap.String("parent_selector", hex.EncodeToString(frame.Header.ParentSelector)),
 					zap.String("prover", hex.EncodeToString(frame.Header.Prover)),
 				)
 
