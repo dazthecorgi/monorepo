@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/testcontainers/testcontainers-go/modules/compose"
 	"go.uber.org/zap"
 )
 
@@ -96,6 +94,9 @@ func main() {
 	defer zapLogger.Sync()
 	logger = zapLogger.Sugar()
 
+	// Create root context for all operations
+	ctx := context.Background()
+
 	// Create uuid for this test run
 	runId := uuid.New().String()
 	logger.Debugw("Generated run ID", "run_id", runId)
@@ -121,20 +122,10 @@ func main() {
 	logger.Debugw("Using working directory", "dir", execDir)
 
 
-	// TODO this is required, because "docker compose up" won't rebuild changed containers when invoked via the API for some reason.
-	// Run docker compose build
+	// Build docker compose services
 	logger.Debug("Building docker compose")
-	buildCmd := exec.Command("docker", "compose", "build")
-	buildCmd.Dir = execDir
-	// Only show docker output in verbose mode
-	if *verbose {
-		buildCmd.Stdout = os.Stdout
-		buildCmd.Stderr = os.Stderr
-	} else {
-		buildCmd.Stdout = io.Discard
-		buildCmd.Stderr = io.Discard
-	}
-	if err := buildCmd.Run(); err != nil {
+	projectName := fmt.Sprintf("test_run_%s", runId)
+	if err = dockerComposeBuild(ctx, execDir, *verbose); err != nil {
 		logger.Errorw("Failed to build docker compose", "error", err)
 		os.Exit(RunnerErrorExitCode)
 	}
@@ -206,8 +197,7 @@ func main() {
 
 	// Start compose stack
 	logger.Debug("Starting compose stack")
-	composeStack, err := Run(runId, execDir, bearerToken, *verbose)
-	if err != nil {
+	if err = Run(ctx, runId, execDir, bearerToken, projectName, *verbose); err != nil {
 		logger.Errorw("Failed to start compose stack", "error", err)
 		os.Exit(RunnerErrorExitCode)
 	}
@@ -227,19 +217,16 @@ func main() {
 	}
 
 	// Shutdown HTTP server
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Errorw("HTTP server shutdown error", "error", err)
 	}
 
 	// Bring down compose stack
 	logger.Debug("Bringing down compose stack")
-	err = composeStack.Down(
-		context.Background(),
-		compose.RemoveOrphans(true),
-		compose.RemoveVolumes(true),
-	)
+	err = dockerComposeDown(ctx, execDir, projectName, *verbose)
+
 	if notification != nil && notification.SafetyError != "" {
 		logger.Errorw("Test FAILED", "error", notification.SafetyError)
 		os.Exit(TestRunErrorExitCode)
@@ -251,48 +238,103 @@ func main() {
 	}
 }
 
-// Run executes "docker compose up" using testcontainers compose module
-func Run(runId string, execDir string, bearerToken string, verbose bool) (*compose.DockerCompose, error) {
-	ctx := context.Background()
-
+// Run executes "docker compose up" using CLI commands
+func Run(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, verbose bool) error {
 	// Verify docker-compose.yml exists
 	composePath := filepath.Join(execDir, "docker-compose.yml")
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("docker-compose.yml not found in %s", execDir)
+		return fmt.Errorf("docker-compose.yml not found in %s", execDir)
 	}
-	logger.Debugw("Found docker-compose.yml", "path", composePath)
+	logger.Debugw("Found docker-compose.yml", "path", composePath, "project", projectName)
 
 	// Prepare environment variables for docker-compose
 	env := map[string]string{
 		"RUN_ID":         runId,
 		"RUNNER_AUTH":    bearerToken,
-		"RUNNER_ADDRESS": "172.17.0.1" + *listenPort, // Gateway IP of proxy-network
+		"RUNNER_ADDRESS": "172.17.0.1" + *listenPort,
 		"STOP_FRAME":     "2", // TODO: make this configurable
 	}
 	logger.Debugw("Prepared environment variables", "env", env)
 
-	var logger *log.Logger
+	// Start services with environment variables
+	if err := dockerComposeUp(ctx, execDir, projectName, env, verbose); err != nil {
+		return fmt.Errorf("failed to start compose stack: %w", err)
+	}
+
+	return nil
+}
+
+// dockerComposeBuild executes "docker compose build" in the specified working directory.
+// It respects the verbose flag for output visibility.
+func dockerComposeBuild(ctx context.Context, workDir string, verbose bool) error {
+	cmd := exec.CommandContext(ctx, "docker", "compose", "build")
+	cmd.Dir = workDir
+
 	if verbose {
-		logger = log.Default()
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 	} else {
-		logger = log.New(io.Discard, "", 0)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
 	}
 
-	// Create compose stack
-	composeStack, err := compose.NewDockerComposeWith(compose.WithLogger(logger), compose.WithStackFiles(composePath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create compose stack: %w", err)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker compose build failed: %w", err)
+	}
+	return nil
+}
+
+// dockerComposeUp executes "docker compose up" with environment variables.
+// It waits for services to be ready based on healthchecks and removes orphaned containers.
+// The --no-build flag is used since build is done separately.
+func dockerComposeUp(ctx context.Context, workDir string, projectName string, env map[string]string, verbose bool) error {
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "up",
+		"-d",              // detached mode
+		"--wait",          // wait for services to be healthy
+		"--remove-orphans", // remove orphaned containers
+		"--no-build",      // don't build images (already done separately)
+	)
+	cmd.Dir = workDir
+
+	// Set environment variables by extending the current environment
+	cmd.Env = os.Environ()
+	for key, value := range env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
 
-	// TODO figure out why Up prints logs even when logger is set to discard. 
-	// TODO figure out why Up won't rebuild changed containers.
-
-	// Set environment variables and start services with build
-	// testcontainers will build images automatically if they don't exist
-	err = composeStack.WithEnv(env).Up(ctx, compose.RemoveOrphans(true), compose.Wait(true))
-	if err != nil {
-		return nil, fmt.Errorf("failed to run docker compose up: %w", err)
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
 	}
 
-	return composeStack, nil
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker compose up failed: %w", err)
+	}
+	return nil
+}
+
+// dockerComposeDown executes "docker compose down" with cleanup flags.
+// It removes containers, networks, orphaned containers, and volumes.
+func dockerComposeDown(ctx context.Context, workDir string, projectName string, verbose bool) error {
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "down",
+		"--remove-orphans", // remove orphaned containers
+		"--volumes",        // remove named volumes
+	)
+	cmd.Dir = workDir
+
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	}
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker compose down failed: %w", err)
+	}
+	return nil
 }
