@@ -18,6 +18,7 @@ import (
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
+	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/safety"
 )
 
 var configDirectory = flag.String(
@@ -35,20 +36,30 @@ var network = flag.Uint(
 type NotificationType string
 
 const (
-	NotificationTypeTerminalFrame NotificationType = "terminal_frame_reached"
+	NotificationTypeTerminalFrame  NotificationType = "terminal_frame_reached"
 )
 
 type FrameNotification struct {
-	RunID       string           `json:"run_id"`
-	FrameNumber uint64           `json:"frame_number"`
-	Type        NotificationType `json:"type"`
+	RunID        string           `json:"run_id"`
+	FrameNumber  uint64           `json:"frame_number"`
+	Type         NotificationType `json:"type"`
+	SafetyError string           `json:"safety_error,omitempty"`
 }
 
-func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64) error {
+func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType NotificationType, frames []*safety.GlobalFrameWrapper) error {
+	safetyError := safety.CheckSafety(frames)
+
+	var safetyErrorMsg string
+	if safetyError != nil {
+		safetyErrorMsg = safetyError.Error()
+		logger.Error("Safety violation detected", zap.String("error", safetyErrorMsg))
+	}
+
 	notification := FrameNotification{
-		RunID:       runID,
-		FrameNumber: frameNumber,
-		Type:        NotificationTypeTerminalFrame,
+		RunID:        runID,
+		FrameNumber:  frameNumber,
+		Type:         notifType,
+		SafetyError: safetyErrorMsg,
 	}
 
 	jsonData, err := json.Marshal(notification)
@@ -155,13 +166,21 @@ func main() {
 
 	logger.Info("DHT node running. Press Ctrl+C to stop.")
 
+	globalFrames := make([]*safety.GlobalFrameWrapper, 0, stopFrame)
+
 	// Monitor global frames until they reach the specified stop frame, then notify the runner and shut down
 	go func() {
 		for frame := range globalFrameChan {
-			if frame.Header.FrameNumber == stopFrame {
-				logger.Info("Received terminal frame number, shutting down ", zap.Uint64("frame_number", frame.Header.FrameNumber))
+			frameNumber := frame.Header.FrameNumber
 
-				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID, frame.Header.FrameNumber)
+			// Add frame to buffer for safety checking
+			globalFrames = append(globalFrames, &safety.GlobalFrameWrapper{GlobalFrame: frame})
+
+			// Check for terminal frame
+			if frameNumber == stopFrame {
+				logger.Info("Received terminal frame number, shutting down", zap.Uint64("frame_number", frameNumber))
+
+				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID, frameNumber, NotificationTypeTerminalFrame, globalFrames)
 
 				cancel(err)
 

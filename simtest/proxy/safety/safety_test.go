@@ -1,4 +1,4 @@
-package main
+package safety
 
 import (
 	"errors"
@@ -81,6 +81,21 @@ func TestCheckSafety_ValidLinearChainOutOfOrder(t *testing.T) {
 
 	// Provide frames out of order
 	frames := []*mockFrame{frame3, frame1, frame4, frame2}
+
+	err := CheckSafety(frames)
+	if err != nil {
+		t.Errorf("expected no error for valid linear chain (out of order), got %v", err)
+	}
+}
+
+func TestCheckSafety_ValidLinearChainDuplicateFrames(t *testing.T) {
+	frame1 := newMockFrame(byteArray(1), byteArray(0))
+	frame2 := newMockFrame(byteArray(2), byteArray(1))
+	frame3 := newMockFrame(byteArray(3), byteArray(2))
+	frame4 := newMockFrame(byteArray(4), byteArray(3))
+
+	// Provide a frame multiple times
+	frames := []*mockFrame{frame3, frame1, frame4, frame2, frame1}
 
 	err := CheckSafety(frames)
 	if err != nil {

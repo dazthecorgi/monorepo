@@ -1,4 +1,4 @@
-package main
+package safety
 
 import (
 	"encoding/hex"
@@ -8,7 +8,7 @@ import (
 
 var (
 	ErrCycle              = errors.New("cycle detected in frame chain")
-	ErrDuplicateFrame     = errors.New("duplicate frame detected")
+	ErrDuplicateFrame     = errors.New("duplicate frame detected with different parents")
 	ErrEmptyFrameSequence = errors.New("empty frame sequence")
 	ErrFork               = errors.New("fork detected")
 )
@@ -78,9 +78,9 @@ func CheckSafety[FrameT FrameFields](frames []FrameT) error {
 	}
 
 	// If we haven't visited all frames, there are disjoint frames.
-	// +1, because the genesis frame's parent will not be in the frames list.
-	if len(visited) != len(frames) + 1 {
-		return fmt.Errorf("%w: only %d out of %d frames are connected", ErrFork, len(visited), len(frames))
+	// parentToChildren includes entries for all frames, so we can compare its length to the number of visited frames.
+	if len(visited) != len(parentToChildren) {
+		return fmt.Errorf("%w: only %d out of %d frames are connected", ErrFork, len(visited), len(parentToChildren))
 	}
 
 	return nil
@@ -88,7 +88,7 @@ func CheckSafety[FrameT FrameFields](frames []FrameT) error {
 
 // buildFrameParents takes a sequence of global frames and returns a map
 // where each key is a frame selector and the value is its parent selector.
-// Returns an error for duplicate parents.
+// Returns an error if an id is mapped to different parents.
 func buildFrameParents[FrameT FrameFields](frames []FrameT) (map[[32]byte][32]byte, error) {
 	parents := make(map[[32]byte][32]byte)
 
@@ -103,8 +103,8 @@ func buildFrameParents[FrameT FrameFields](frames []FrameT) (map[[32]byte][32]by
 			return nil, fmt.Errorf("failed to get parent selector: %w", err)
 		}
 
-		if _, exists := parents[identity]; exists {
-			return nil, fmt.Errorf("%w: frame %s appears multiple times", ErrDuplicateFrame, hex.EncodeToString(identity[:]))
+		if _, exists := parents[identity]; exists && parents[identity] != parentSelector {
+			return nil, fmt.Errorf("%w: frame %s", ErrDuplicateFrame, hex.EncodeToString(identity[:]))
 		}
 
 		parents[identity] = parentSelector

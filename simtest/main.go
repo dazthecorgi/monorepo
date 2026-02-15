@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -32,16 +33,22 @@ var listenPort = flag.String(
 	"port to listen for notifications from proxy",
 )
 
+const (
+	RunnerErrorExitCode = 1
+	TestRunErrorExitCode = 2
+)
+
 type NotificationType string
 
 const (
-	NotificationTypeTerminalFrame NotificationType = "terminal_frame_reached"
+	NotificationTypeTerminalFrame  NotificationType = "terminal_frame_reached"
 )
 
 type FrameNotification struct {
-	RunID       string           `json:"run_id,omitempty"`
-	FrameNumber uint64           `json:"frame_number"`
-	Type        NotificationType `json:"type"`
+	RunID        string           `json:"run_id,omitempty"`
+	FrameNumber  uint64           `json:"frame_number"`
+	Type         NotificationType `json:"type"`
+	SafetyError string           `json:"safety_error,omitempty"`
 }
 
 // generateBearerToken creates a secure random bearer token
@@ -59,13 +66,12 @@ func main() {
 
 	// Create uuid for this test run
 	runId := uuid.New().String()
-	fmt.Printf("Test run ID: %s\n", runId)
 
 	// Generate bearer token for authentication
 	bearerToken, err := generateBearerToken()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to generate bearer token: %v\n", err)
-		os.Exit(1)
+		os.Exit(RunnerErrorExitCode)
 	}
 
 	// Get the directory where docker-compose.yml is located
@@ -75,12 +81,22 @@ func main() {
 		cwd, err := os.Getwd()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to get current directory: %v\n", err)
-			os.Exit(1)
+			os.Exit(RunnerErrorExitCode)
 		}
 		execDir = cwd
 	}
 
-	fmt.Printf("Working directory: %s\n", execDir)
+
+	// TODO this is required, because "docker compose up" won't rebuild changed containers when invoked via the API for some reason.
+	// Run docker compose build
+	buildCmd := exec.Command("docker", "compose", "build")
+	buildCmd.Dir = execDir
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to build docker compose: %v\n", err)
+		os.Exit(RunnerErrorExitCode)
+	}
 
 	frameNotificationChan := make(chan FrameNotification, 100)
 
@@ -119,9 +135,6 @@ func main() {
 			return
 		}
 
-		fmt.Printf("Received notification: type=%s, frame=%d, run_id=%s\n",
-			notification.Type, notification.FrameNumber, notification.RunID)
-
 		// Verify run ID matches
 		if notification.RunID != runId {
 			fmt.Printf("Warning: notification run_id (%s) does not match our run_id (%s)\n",
@@ -130,8 +143,10 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 
-		// Signal shutdown
-		frameNotificationChan <- notification
+		// Signal shutdown only for terminal frame
+		if notification.Type == NotificationTypeTerminalFrame {
+			frameNotificationChan <- notification
+		}
 	})
 
 	server := &http.Server{
@@ -141,7 +156,6 @@ func main() {
 
 	// Start server in background
 	go func() {
-		fmt.Printf("Starting notification server on %s\n", *listenPort)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
 		}
@@ -151,16 +165,18 @@ func main() {
 	composeStack, err := Run(runId, execDir, bearerToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		os.Exit(RunnerErrorExitCode)
 	}
 
 	// Wait for notification or interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	var notification *FrameNotification
 	select {
-	case notification := <-frameNotificationChan:
-		fmt.Printf("Terminal frame %d reached, shutting down...\n", notification.FrameNumber)
+	case n := <-frameNotificationChan:
+		fmt.Printf("Terminal frame %d reached, shutting down...\n", n.FrameNumber)
+		notification = &n
 	case sig := <-sigChan:
 		fmt.Printf("Received signal %v, shutting down...\n", sig)
 	}
@@ -173,21 +189,23 @@ func main() {
 	}
 
 	// Bring down compose stack
-	fmt.Println("Stopping compose stack...")
 	err = composeStack.Down(
 		context.Background(),
 		compose.RemoveOrphans(true),
 		compose.RemoveVolumes(true),
 	)
-	if err == nil {
-		fmt.Println("Compose stack stopped successfully")
+	if notification != nil && notification.SafetyError != "" {
+		fmt.Printf("Test FAILED: %s", notification.SafetyError)
+		os.Exit(TestRunErrorExitCode)
+	} else if err == nil {
+		fmt.Println("Test SUCCEEDED")
 	} else {
 		fmt.Printf("Failed to stop compose stack: %v\n", err)
-		os.Exit(1)
+		os.Exit(RunnerErrorExitCode)
 	}
 }
 
-// Run executes "docker compose up -d --build" using testcontainers compose module
+// Run executes "docker compose up" using testcontainers compose module
 func Run(runId string, execDir string, bearerToken string) (*compose.DockerCompose, error) {
 	ctx := context.Background()
 
@@ -211,14 +229,13 @@ func Run(runId string, execDir string, bearerToken string) (*compose.DockerCompo
 		return nil, fmt.Errorf("failed to create compose stack: %w", err)
 	}
 
+	// TODO figure out why this won't rebuild changed containers.
 	// Set environment variables and start services with build
 	// testcontainers will build images automatically if they don't exist
-	// WithRecreate forces recreation of containers (similar to --force-recreate)
-	err = composeStack.WithEnv(env).Up(ctx, compose.Wait(true), compose.WithRecreate("force"), compose.WithRecreateDependencies("force"))
+	err = composeStack.WithEnv(env).Up(ctx, compose.RemoveOrphans(true), compose.Wait(true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to run docker compose up: %w", err)
 	}
 
-	fmt.Println("Docker Compose started successfully")
 	return composeStack, nil
 }
