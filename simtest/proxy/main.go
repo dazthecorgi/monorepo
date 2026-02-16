@@ -11,7 +11,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -101,6 +103,7 @@ func main() {
 	runnerAddress := os.Getenv("RUNNER_ADDRESS")
 	stopFrameStr := os.Getenv("STOP_FRAME")
 	runnerAuthToken := os.Getenv("RUNNER_AUTH")
+	nodeAddressesStr := os.Getenv("NODE_ADDRESSES")
 
 	// Validate required environment variables
 	if runID == "" {
@@ -119,6 +122,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: STOP_FRAME environment variable is required\n")
 		os.Exit(1)
 	}
+	if nodeAddressesStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: NODE_ADDRESSES environment variable is required\n")
+		os.Exit(1)
+	}	
 
 	// Parse stopFrame
 	stopFrame, err := strconv.ParseUint(stopFrameStr, 10, 64)
@@ -168,26 +175,55 @@ func main() {
 
 	globalFrames := make([]*safety.GlobalFrameWrapper, 0, stopFrame)
 
-	// Monitor global frames until they reach the specified stop frame, then notify the runner and shut down
+	// TODO move these to config
+	pollInterval := 5 * time.Second
+	gracePeriod := 60 * time.Second
+	requireAllNodes := true
+
+	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
+
+	frameMonitor, err := NewFrameMonitor(
+		ctx,
+		logger,
+		stopFrame,
+		nodeAddresses,
+		pollInterval,
+		requireAllNodes,
+		gracePeriod,
+	)
+
+	if err != nil {
+		logger.Fatal("failed to create frame monitor", zap.Error(err))
+	}
+
+	// Continue collecting frames from BlossomSub for safety checking
+	go func() {
+		for frame := range globalFrameChan {
+			globalFrames = append(globalFrames, &safety.GlobalFrameWrapper{GlobalFrame: frame})
+			logger.Debug("received global frame",
+				zap.Uint64("frame_number", frame.Header.FrameNumber))
+		}
+	}()
+
 	go func() {
 		for frame := range globalFrameChan {
 			frameNumber := frame.Header.FrameNumber
-
-			// Add frame to buffer for safety checking
 			globalFrames = append(globalFrames, &safety.GlobalFrameWrapper{GlobalFrame: frame})
 
-			// Check for terminal frame
 			if frameNumber == stopFrame {
-				logger.Info("Received terminal frame number, shutting down", zap.Uint64("frame_number", frameNumber))
+				logger.Info("received terminal frame over gossip network, monitoring all nodes now",
+					zap.Uint64("frame_number", frameNumber))
 
-				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID, frameNumber, NotificationTypeTerminalFrame, globalFrames)
+				frameMonitor.startMonitoring()
+				logger.Info("all nodes reached terminal frame")
+
+				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
+					frameNumber, NotificationTypeTerminalFrame, globalFrames)
 
 				cancel(err)
-
 				return
 			}
-		}
-	}()
+	}}()
 
 	select {
     case <-done:
@@ -201,6 +237,9 @@ func main() {
 	}
 
 	logger.Info("Shutting down DHT node...")
+
+	frameMonitor.Close()
 	blossomSub.Close()
+	
 	os.Exit(0)
 }

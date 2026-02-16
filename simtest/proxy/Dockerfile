@@ -1,7 +1,7 @@
 # It needs the repo root as context
 
 # syntax=docker.io/docker/dockerfile:1.7-labs
-FROM --platform=${TARGETPLATFORM} ubuntu:24.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 ARG GO_VERSION=1.24.9
 
@@ -30,7 +30,7 @@ COPY . .
 WORKDIR /build/simtest/proxy
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -o proxy main.go
+    CGO_ENABLED=0 GOOS=linux go build -o proxy .
 
 # Build p2p-ping
 WORKDIR /build/go-libp2p/examples/p2p-ping

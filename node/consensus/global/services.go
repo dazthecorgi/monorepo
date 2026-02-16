@@ -25,15 +25,18 @@ func (e *GlobalConsensusEngine) GetGlobalFrame(
 	ctx context.Context,
 	request *protobufs.GetGlobalFrameRequest,
 ) (*protobufs.GlobalFrameResponse, error) {
-	peerID, err := e.authenticateProverFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
+	// TODO uncomment
+	// peerID, err := e.authenticateProverFromContext(ctx)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	var err error // TODO remove when uncommenting authentication
 
 	e.logger.Debug(
 		"received frame request",
 		zap.Uint64("frame_number", request.FrameNumber),
-		zap.String("peer_id", peerID.String()),
+		// TODO uncomment
+		// zap.String("peer_id", peerID.String()),
 	)
 	var frame *protobufs.GlobalFrame
 	if request.FrameNumber == 0 {
@@ -51,7 +54,7 @@ func (e *GlobalConsensusEngine) GetGlobalFrame(
 	if err != nil {
 		e.logger.Debug(
 			"received error while fetching time reel head",
-			zap.String("peer_id", peerID.String()),
+			// TODO uncomment
 			zap.Uint64("frame_number", request.FrameNumber),
 			zap.Error(err),
 		)

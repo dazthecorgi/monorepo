@@ -411,6 +411,37 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	}
 }
 
+// getArchiveServices discovers archive services from docker-compose.yml
+// Returns a comma-separated list of node addresses (e.g., "archive-1:8337,archive-2:8337")
+func getArchiveServices(ctx context.Context, workDir string) (string, error) {
+	// Use docker compose config --services to list all services
+	cmd := exec.CommandContext(ctx, "docker", "compose", "config", "--services")
+	cmd.Dir = workDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to list docker compose services: %w", err)
+	}
+
+	// Parse service names and filter for archive-* services
+	services := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var archiveAddresses []string
+
+	for _, service := range services {
+		service = strings.TrimSpace(service)
+		if strings.HasPrefix(service, "archive-") {
+			// Archive nodes expose global consensus gRPC on port 8340
+			archiveAddresses = append(archiveAddresses, fmt.Sprintf("%s:8340", service))
+		}
+	}
+
+	if len(archiveAddresses) == 0 {
+		return "", fmt.Errorf("no archive node addresses found")
+	}
+
+	return strings.Join(archiveAddresses, ","), nil
+}
+
 // executeTest executes "docker compose up" using CLI commands
 func executeTest(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, stopFrame int, verbose bool, parallel int) error {
 	// Verify docker-compose.yml exists
@@ -420,12 +451,19 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 	}
 	logger.Debugw("Found docker-compose.yml", "path", composePath, "project", projectName)
 
+	// Discover archive services for multi-node synchronization
+	nodeAddresses, err := getArchiveServices(ctx, execDir)
+	if err != nil {
+		return err
+	}
+
 	// Prepare environment variables for docker-compose
 	env := map[string]string{
 		"RUN_ID":         runId,
 		"RUNNER_AUTH":    bearerToken,
 		"RUNNER_ADDRESS": "host.docker.internal:" + strings.TrimPrefix(*listenPort, ":"),
 		"STOP_FRAME":     fmt.Sprintf("%d", stopFrame),
+		"NODE_ADDRESSES": nodeAddresses,
 	}
 
 	// Start services with environment variables

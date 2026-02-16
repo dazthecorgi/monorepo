@@ -1127,21 +1127,24 @@ func (e *GlobalConsensusEngine) setupGRPCServer() error {
 		},
 	)
 
-	tlsCreds, err := e.authProvider.CreateServerTLSCredentials()
-	if err != nil {
-		return errors.Wrap(err, "setup gRPC server")
-	}
+	// TODO uncomment
+	// tlsCreds, err := e.authProvider.CreateServerTLSCredentials()
+	// if err != nil {
+	// 	return errors.Wrap(err, "setup gRPC server")
+	// }
 
 	// Create gRPC server with TLS
 	e.grpcServer = qgrpc.NewServer(
-		grpc.Creds(tlsCreds),
-		grpc.ChainUnaryInterceptor(e.authProvider.UnaryInterceptor),
-		grpc.ChainStreamInterceptor(e.authProvider.StreamInterceptor),
+		// TODO uncomment
+		// grpc.Creds(tlsCreds),
+		// grpc.ChainUnaryInterceptor(e.authProvider.UnaryInterceptor),
+		// grpc.ChainStreamInterceptor(e.authProvider.StreamInterceptor),
 		grpc.MaxRecvMsgSize(10*1024*1024),
 		grpc.MaxSendMsgSize(10*1024*1024),
 	)
 
 	// Create TCP listener
+	var err error // TODO remove when uncommenting TLS
 	e.grpcListener, err = net.Listen("tcp", listenAddr)
 	if err != nil {
 		return errors.Wrap(err, "setup gRPC server")
