@@ -53,6 +53,8 @@ services:
       - archive-2-network
       - archive-3-network
       - archive-4-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./config/proxy-config/:/root/config
     healthcheck:

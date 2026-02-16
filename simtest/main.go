@@ -424,7 +424,7 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 	env := map[string]string{
 		"RUN_ID":         runId,
 		"RUNNER_AUTH":    bearerToken,
-		"RUNNER_ADDRESS": "172.17.0.1" + *listenPort,
+		"RUNNER_ADDRESS": "host.docker.internal:" + *listenPort,
 		"STOP_FRAME":     fmt.Sprintf("%d", stopFrame),
 	}
 
