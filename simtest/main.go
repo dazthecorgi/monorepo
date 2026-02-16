@@ -12,10 +12,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,6 +45,12 @@ var stopFrame = flag.Int(
 	"frame number at which the simulation should stop",
 )
 
+var parallel = flag.Int(
+	"parallel",
+	1,
+	"number of test runs to execute in parallel",
+)
+
 var logger *zap.SugaredLogger
 
 const (
@@ -64,6 +69,47 @@ type FrameNotification struct {
 	FrameNumber  uint64           `json:"frame_number"`
 	Type         NotificationType `json:"type"`
 	SafetyError string           `json:"safety_error,omitempty"`
+}
+
+type TestResult struct {
+	RunID        string
+	Success      bool
+	ErrorMessage string
+	Duration     time.Duration
+}
+
+type NotificationRouter struct {
+	mu       sync.RWMutex
+	channels map[string]chan FrameNotification
+}
+
+func NewNotificationRouter() *NotificationRouter {
+	return &NotificationRouter{
+		channels: make(map[string]chan FrameNotification),
+	}
+}
+
+func (nr *NotificationRouter) Register(runID string, ch chan FrameNotification) {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	nr.channels[runID] = ch
+}
+
+func (nr *NotificationRouter) Unregister(runID string) {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	delete(nr.channels, runID)
+}
+
+func (nr *NotificationRouter) Route(notification FrameNotification) {
+	nr.mu.RLock()
+	defer nr.mu.RUnlock()
+
+	if ch, ok := nr.channels[notification.RunID]; ok {
+		ch <- notification
+	} else {
+		logger.Warnw("Notification for unknown run ID", "run_id", notification.RunID)
+	}
 }
 
 // generateBearerToken creates a secure random bearer token
@@ -100,24 +146,11 @@ func main() {
 	defer zapLogger.Sync()
 	logger = zapLogger.Sugar()
 
-	// Create root context for all operations
 	ctx := context.Background()
 
-	// Create uuid for this test run
-	runId := uuid.New().String()
-	logger.Debugw("Generated run ID", "run_id", runId)
-
-	// Generate bearer token for authentication
-	bearerToken, err := generateBearerToken()
-	if err != nil {
-		logger.Errorw("Failed to generate bearer token", "error", err)
-		os.Exit(RunnerErrorExitCode)
-	}
-
-	// Get the directory where docker-compose.yml is located
+	// Get working directory
 	execDir := *workingDir
 	if execDir == "" {
-		// Fall back to current working directory
 		cwd, err := os.Getwd()
 		if err != nil {
 			logger.Errorw("Failed to get current directory", "error", err)
@@ -125,21 +158,24 @@ func main() {
 		}
 		execDir = cwd
 	}
-	logger.Debugw("Using working directory", "dir", execDir)
 
-
-	// Build docker compose services
-	logger.Debug("Building docker compose")
-	projectName := fmt.Sprintf("test_run_%s", runId)
-	if err = dockerComposeBuild(ctx, execDir, *verbose); err != nil {
+	// Build images ONCE (shared by all test runs)
+	if err := dockerComposeBuild(ctx, execDir, *verbose); err != nil {
 		logger.Errorw("Failed to build docker compose", "error", err)
 		os.Exit(RunnerErrorExitCode)
 	}
 
-	frameNotificationChan := make(chan FrameNotification, 100)
+	// Create notification router
+	router := NewNotificationRouter()
 
-	// Start HTTP server to listen for notifications
-	logger.Debugw("Starting HTTP server", "listen", *listenPort)
+	// Generate bearer token once (shared by all runs)
+	bearerToken, err := generateBearerToken()
+	if err != nil {
+		logger.Errorw("Failed to generate bearer token", "error", err)
+		os.Exit(RunnerErrorExitCode)
+	}
+
+	// Start shared HTTP server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/run-notification", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -154,14 +190,12 @@ func main() {
 			return
 		}
 
-		// Check for Bearer prefix and extract token
 		const bearerPrefix = "Bearer "
 		if !strings.HasPrefix(authHeader, bearerPrefix) {
 			http.Error(w, "Invalid authorization header format", http.StatusUnauthorized)
 			return
 		}
 
-		// Use constant time comparison to prevent timing attacks
 		token := strings.TrimPrefix(authHeader, bearerPrefix)
 		if subtle.ConstantTimeCompare([]byte(token), []byte(bearerToken)) != 1 {
 			http.Error(w, "Invalid bearer token", http.StatusUnauthorized)
@@ -174,18 +208,13 @@ func main() {
 			return
 		}
 
-		// Verify run ID matches
-		if notification.RunID != runId {
-			logger.Warnw("Notification run_id does not match",
-				"notification_run_id", notification.RunID,
-				"expected_run_id", runId)
-		}
-
 		w.WriteHeader(http.StatusOK)
 
-		// Signal shutdown only for terminal frame
+		logger.Debugw("Received notification", "run_id", notification.RunID, "frame_number", notification.FrameNumber, "type", notification.Type, "safety_error", notification.SafetyError)	
+
+		// Route notification to correct test run
 		if notification.Type == NotificationTypeTerminalFrame {
-			frameNotificationChan <- notification
+			router.Route(notification)
 		}
 	})
 
@@ -200,26 +229,38 @@ func main() {
 			logger.Errorw("HTTP server error", "error", err)
 		}
 	}()
+	logger.Debugw("HTTP notification server started", "address", *listenPort)
 
-	// Start compose stack
-	logger.Debug("Starting compose stack")
-	if err = Run(ctx, runId, execDir, bearerToken, projectName, *verbose); err != nil {
-		logger.Errorw("Failed to start compose stack", "error", err)
-		os.Exit(RunnerErrorExitCode)
+	// Spawn parallel test runs
+	var wg sync.WaitGroup
+	wg.Add(*parallel)
+	resultsChan := make(chan TestResult, *parallel)
+
+	for i := 0; i < *parallel; i++ {
+		go func(runNumber int) {
+			defer wg.Done()
+
+			runID := uuid.New().String()
+			logger.Debugw("Starting test run", "run_number", runNumber+1, "run_id", runID)
+
+			startTime := time.Now()
+			result := runSingleTest(ctx, runID, execDir, bearerToken, router, *verbose, *stopFrame)
+			result.Duration = time.Since(startTime)
+
+			resultsChan <- result
+		}(i)
 	}
-	logger.Debug("Compose stack started successfully")
 
-	// Wait for notification or interrupt signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// Wait for all runs to complete in background
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
 
-	var notification *FrameNotification
-	select {
-	case n := <-frameNotificationChan:
-		logger.Debugw("Terminal frame reached, shutting down", "frame_number", n.FrameNumber)
-		notification = &n
-	case sig := <-sigChan:
-		logger.Debugw("Received signal, shutting down", "signal", sig)
+	// Collect results
+	var results []TestResult
+	for result := range resultsChan {
+		results = append(results, result)
 	}
 
 	// Shutdown HTTP server
@@ -229,23 +270,72 @@ func main() {
 		logger.Errorw("HTTP server shutdown error", "error", err)
 	}
 
-	// Bring down compose stack
-	logger.Debug("Bringing down compose stack")
-	err = dockerComposeDown(ctx, execDir, projectName, *verbose)
+	// Print summary report
+	printSummary(results)
 
-	if notification != nil && notification.SafetyError != "" {
-		logger.Errorw("Test FAILED", "error", notification.SafetyError)
+	// Exit with appropriate code
+	if hasFailures(results) {
 		os.Exit(TestRunErrorExitCode)
-	} else if err == nil {
-		logger.Info("Test SUCCEEDED")
 	} else {
-		logger.Errorw("Failed to stop compose stack", "error", err)
-		os.Exit(RunnerErrorExitCode)
+		logger.Info("Test PASSED")
 	}
 }
 
-// Run executes "docker compose up" using CLI commands
-func Run(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, verbose bool) error {
+func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int) TestResult {
+	// Create notification channel for this run
+	notifChan := make(chan FrameNotification, 10)
+	router.Register(runID, notifChan)
+	defer router.Unregister(runID)
+	defer close(notifChan)
+
+	projectName := fmt.Sprintf("simtest_run_%s", runID)
+
+	// Start compose stack
+	if err := executeTest(ctx, runID, execDir, bearerToken, projectName, stopFrame, verbose, *parallel); err != nil {
+		logger.Errorw("Failed to start compose stack", "error", err, "run_id", runID)
+		return TestResult{
+			RunID:        runID,
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("failed to start: %v", err),
+		}
+	}
+
+	// Wait for notification or context cancellation
+	var notification *FrameNotification
+	select {
+	case n := <-notifChan:
+		logger.Debugw("Terminal frame reached", "run_id", runID, "frame_number", n.FrameNumber)
+		notification = &n
+	case <-ctx.Done():
+		logger.Debugw("Context cancelled", "run_id", runID)
+	}
+
+	// Bring down compose stack
+	err := dockerComposeDown(ctx, execDir, projectName, verbose, *parallel)
+
+	// Determine result
+	if notification != nil && notification.SafetyError != "" {
+		return TestResult{
+			RunID:        runID,
+			Success:      false,
+			ErrorMessage: notification.SafetyError,
+		}
+	} else if err != nil {
+		return TestResult{
+			RunID:        runID,
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("failed to stop: %v", err),
+		}
+	}
+
+	return TestResult{
+		RunID:   runID,
+		Success: true,
+	}
+}
+
+// executeTest executes "docker compose up" using CLI commands
+func executeTest(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, stopFrame int, verbose bool, parallel int) error {
 	// Verify docker-compose.yml exists
 	composePath := filepath.Join(execDir, "docker-compose.yml")
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
@@ -258,16 +348,58 @@ func Run(ctx context.Context, runId string, execDir string, bearerToken string, 
 		"RUN_ID":         runId,
 		"RUNNER_AUTH":    bearerToken,
 		"RUNNER_ADDRESS": "172.17.0.1" + *listenPort,
-		"STOP_FRAME":     fmt.Sprintf("%d", *stopFrame),
+		"STOP_FRAME":     fmt.Sprintf("%d", stopFrame),
 	}
-	logger.Debugw("Prepared environment variables", "env", env)
 
 	// Start services with environment variables
-	if err := dockerComposeUp(ctx, execDir, projectName, env, verbose); err != nil {
+	if err := dockerComposeUp(ctx, execDir, projectName, env, verbose, parallel); err != nil {
 		return fmt.Errorf("failed to start compose stack: %w", err)
 	}
 
 	return nil
+}
+
+func printSummary(results []TestResult) {
+	passed := 0
+	failed := 0
+
+	for _, r := range results {
+		logger.Debugf("Test run result, run_id=%s, success=%t, duration=%s", r.RunID, r.Success, r.Duration)
+		if r.Success {
+			passed++
+		} else {
+			failed++
+		}
+	}
+
+	logger.Infow("Test Summary",
+		"total", len(results),
+		"passed", passed,
+		"failed", failed,
+	)
+
+	// Show details for failures
+	if failed > 0 {
+		logger.Info("Failed test runs:")
+		for _, r := range results {
+			if !r.Success {
+				logger.Errorw("  Run failed",
+					"run_id", r.RunID,
+					"error", r.ErrorMessage,
+					"duration", r.Duration,
+				)
+			}
+		}
+	}
+}
+
+func hasFailures(results []TestResult) bool {
+	for _, r := range results {
+		if !r.Success {
+			return true
+		}
+	}
+	return false
 }
 
 // dockerComposeBuild executes "docker compose build" in the specified working directory.
@@ -293,7 +425,9 @@ func dockerComposeBuild(ctx context.Context, workDir string, verbose bool) error
 // dockerComposeUp executes "docker compose up" with environment variables.
 // It waits for services to be ready based on healthchecks and removes orphaned containers.
 // The --no-build flag is used since build is done separately.
-func dockerComposeUp(ctx context.Context, workDir string, projectName string, env map[string]string, verbose bool) error {
+func dockerComposeUp(ctx context.Context, workDir string, projectName string, env map[string]string, verbose bool, parallel int) error {
+	logger.Debugw("Executing docker compose up", "project", projectName, "env", env)
+
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "up",
 		"-d",              // detached mode
 		"--wait",          // wait for services to be healthy
@@ -308,7 +442,8 @@ func dockerComposeUp(ctx context.Context, workDir string, projectName string, en
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
 
-	if verbose {
+	// Suppress output for parallel runs to avoid interleaving logs, but show for single runs if verbose is enabled
+	if verbose && parallel == 1 {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {
@@ -324,14 +459,17 @@ func dockerComposeUp(ctx context.Context, workDir string, projectName string, en
 
 // dockerComposeDown executes "docker compose down" with cleanup flags.
 // It removes containers, networks, orphaned containers, and volumes.
-func dockerComposeDown(ctx context.Context, workDir string, projectName string, verbose bool) error {
+func dockerComposeDown(ctx context.Context, workDir string, projectName string, verbose bool, parallel int) error {
+	logger.Debugw("Executing docker compose down", "project", projectName)
+
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "down",
 		"--remove-orphans", // remove orphaned containers
 		"--volumes",        // remove named volumes
 	)
 	cmd.Dir = workDir
 
-	if verbose {
+	// Suppress output for parallel runs to avoid interleaving logs, but show for single runs if verbose is enabled
+	if verbose && parallel == 1 {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {
