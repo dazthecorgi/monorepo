@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +58,7 @@ var logger *zap.SugaredLogger
 const (
 	RunnerErrorExitCode = 1
 	TestRunErrorExitCode = 2
+	InterruptExitCode = 130
 )
 
 type NotificationType string
@@ -112,6 +115,39 @@ func (nr *NotificationRouter) Route(notification FrameNotification) {
 	}
 }
 
+type ProjectRegistry struct {
+	mu       sync.Mutex
+	projects map[string]bool
+}
+
+func NewProjectRegistry() *ProjectRegistry {
+	return &ProjectRegistry{
+		projects: make(map[string]bool),
+	}
+}
+
+func (pr *ProjectRegistry) Register(projectName string) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	pr.projects[projectName] = true
+}
+
+func (pr *ProjectRegistry) Unregister(projectName string) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	delete(pr.projects, projectName)
+}
+
+func (pr *ProjectRegistry) GetAll() []string {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	var result []string
+	for name := range pr.projects {
+		result = append(result, name)
+	}
+	return result
+}
+
 // generateBearerToken creates a secure random bearer token
 func generateBearerToken() (string, error) {
 	b := make([]byte, 32)
@@ -146,7 +182,8 @@ func main() {
 	defer zapLogger.Sync()
 	logger = zapLogger.Sugar()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Get working directory
 	execDir := *workingDir
@@ -231,6 +268,19 @@ func main() {
 	}()
 	logger.Debugw("HTTP notification server started", "address", *listenPort)
 
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	projectRegistry := NewProjectRegistry()
+
+	// Handle signals in background
+	go func() {
+		sig := <-sigChan
+		logger.Infow("Received interrupt signal, initiating shutdown", "signal", sig)
+		cancel()
+	}()
+
 	// Spawn parallel test runs
 	var wg sync.WaitGroup
 	wg.Add(*parallel)
@@ -244,7 +294,7 @@ func main() {
 			logger.Debugw("Starting test run", "run_number", runNumber+1, "run_id", runID)
 
 			startTime := time.Now()
-			result := runSingleTest(ctx, runID, execDir, bearerToken, router, *verbose, *stopFrame)
+			result := runSingleTest(ctx, runID, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry)
 			result.Duration = time.Since(startTime)
 
 			resultsChan <- result
@@ -257,31 +307,53 @@ func main() {
 		close(resultsChan)
 	}()
 
-	// Collect results
+	// Collect results as they complete
 	var results []TestResult
 	for result := range resultsChan {
 		results = append(results, result)
 	}
 
-	// Shutdown HTTP server
-	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	// Check if we were interrupted
+	interrupted := ctx.Err() != nil
+
+	// Shutdown HTTP server gracefully
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Errorw("HTTP server shutdown error", "error", err)
 	}
 
+	// Cleanup any remaining active projects (safety net for interrupt case)
+	if interrupted {
+		activeProjects := projectRegistry.GetAll()
+		if len(activeProjects) > 0 {
+			logger.Infow("Cleaning up remaining Docker Compose projects", "count", len(activeProjects))
+			for _, projectName := range activeProjects {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if err := dockerComposeDown(cleanupCtx, execDir, projectName, *verbose, *parallel); err != nil {
+					logger.Errorw("Failed to cleanup project", "error", err, "project", projectName)
+				}
+				cleanupCancel()
+			}
+		}
+	}
+
 	// Print summary report
-	printSummary(results)
+	printSummary(results, interrupted)
 
 	// Exit with appropriate code
+	if interrupted {
+		logger.Warnw("Tests interrupted by signal", "completed", len(results), "expected", *parallel)
+		os.Exit(InterruptExitCode)
+	}
 	if hasFailures(results) {
 		os.Exit(TestRunErrorExitCode)
-	} else {
-		logger.Info("Test PASSED")
 	}
+	logger.Info("Test PASSED")
+	os.Exit(0)
 }
 
-func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int) TestResult {
+func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry) TestResult {
 	// Create notification channel for this run
 	notifChan := make(chan FrameNotification, 10)
 	router.Register(runID, notifChan)
@@ -300,6 +372,20 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 		}
 	}
 
+	// Register project and ensure cleanup on all exit paths
+	projectRegistry.Register(projectName)
+	defer func() {
+		// Use background context for cleanup so it runs even if main context cancelled
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+
+		if err := dockerComposeDown(cleanupCtx, execDir, projectName, verbose, *parallel); err != nil {
+			logger.Errorw("Failed to cleanup compose stack", "error", err, "run_id", runID, "project", projectName)
+		}
+
+		projectRegistry.Unregister(projectName)
+	}()
+
 	// Wait for notification or context cancellation
 	var notification *FrameNotification
 	select {
@@ -307,24 +393,15 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 		logger.Debugw("Terminal frame reached", "run_id", runID, "frame_number", n.FrameNumber)
 		notification = &n
 	case <-ctx.Done():
-		logger.Debugw("Context cancelled", "run_id", runID)
+		logger.Debugw("Test run cancelled", "run_id", runID, "reason", ctx.Err())
 	}
 
-	// Bring down compose stack
-	err := dockerComposeDown(ctx, execDir, projectName, verbose, *parallel)
-
-	// Determine result
+	// Determine result based on notification
 	if notification != nil && notification.SafetyError != "" {
 		return TestResult{
 			RunID:        runID,
 			Success:      false,
 			ErrorMessage: notification.SafetyError,
-		}
-	} else if err != nil {
-		return TestResult{
-			RunID:        runID,
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("failed to stop: %v", err),
 		}
 	}
 
@@ -359,7 +436,7 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 	return nil
 }
 
-func printSummary(results []TestResult) {
+func printSummary(results []TestResult, interrupted bool) {
 	passed := 0
 	failed := 0
 
@@ -372,7 +449,13 @@ func printSummary(results []TestResult) {
 		}
 	}
 
+	status := "COMPLETED"
+	if interrupted {
+		status = "INTERRUPTED"
+	}
+
 	logger.Infow("Test Summary",
+		"status", status,
 		"total", len(results),
 		"passed", passed,
 		"failed", failed,
