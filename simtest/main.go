@@ -31,7 +31,7 @@ var workingDir = flag.String(
 
 var listenPort = flag.String(
 	"listen",
-	":8080",
+	"8080",
 	"port to listen for notifications from proxy",
 )
 
@@ -56,21 +56,21 @@ var parallel = flag.Int(
 var logger *zap.SugaredLogger
 
 const (
-	RunnerErrorExitCode = 1
+	RunnerErrorExitCode  = 1
 	TestRunErrorExitCode = 2
-	InterruptExitCode = 130
+	InterruptExitCode    = 130
 )
 
 type NotificationType string
 
 const (
-	NotificationTypeTerminalFrame  NotificationType = "terminal_frame_reached"
+	NotificationTypeTerminalFrame NotificationType = "terminal_frame_reached"
 )
 
 type FrameNotification struct {
-	RunID        string           `json:"run_id,omitempty"`
-	FrameNumber  uint64           `json:"frame_number"`
-	Type         NotificationType `json:"type"`
+	RunID       string           `json:"run_id,omitempty"`
+	FrameNumber uint64           `json:"frame_number"`
+	Type        NotificationType `json:"type"`
 	SafetyError string           `json:"safety_error,omitempty"`
 }
 
@@ -247,7 +247,7 @@ func main() {
 
 		w.WriteHeader(http.StatusOK)
 
-		logger.Debugw("Received notification", "run_id", notification.RunID, "frame_number", notification.FrameNumber, "type", notification.Type, "safety_error", notification.SafetyError)	
+		logger.Debugw("Received notification", "run_id", notification.RunID, "frame_number", notification.FrameNumber, "type", notification.Type, "safety_error", notification.SafetyError)
 
 		// Route notification to correct test run
 		if notification.Type == NotificationTypeTerminalFrame {
@@ -256,7 +256,7 @@ func main() {
 	})
 
 	server := &http.Server{
-		Addr:    *listenPort,
+		Addr:    ":" + *listenPort,
 		Handler: mux,
 	}
 
@@ -266,7 +266,7 @@ func main() {
 			logger.Errorw("HTTP server error", "error", err)
 		}
 	}()
-	logger.Debugw("HTTP notification server started", "address", *listenPort)
+	logger.Debugw("HTTP notification server started", "port", *listenPort)
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
@@ -424,7 +424,7 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 	env := map[string]string{
 		"RUN_ID":         runId,
 		"RUNNER_AUTH":    bearerToken,
-		"RUNNER_ADDRESS": "host.docker.internal:" + *listenPort,
+		"RUNNER_ADDRESS": "host.docker.internal:" + strings.TrimPrefix(*listenPort, ":"),
 		"STOP_FRAME":     fmt.Sprintf("%d", stopFrame),
 	}
 
@@ -512,10 +512,10 @@ func dockerComposeUp(ctx context.Context, workDir string, projectName string, en
 	logger.Debugw("Executing docker compose up", "project", projectName, "env", env)
 
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "up",
-		"-d",              // detached mode
-		"--wait",          // wait for services to be healthy
+		"-d",               // detached mode
+		"--wait",           // wait for services to be healthy
 		"--remove-orphans", // remove orphaned containers
-		"--no-build",      // don't build images (already done separately)
+		"--no-build",       // don't build images (already done separately)
 	)
 	cmd.Dir = workDir
 
