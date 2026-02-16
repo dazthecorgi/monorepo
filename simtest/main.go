@@ -40,6 +40,12 @@ var verbose = flag.Bool(
 	"enable verbose logging (DEBUG level)",
 )
 
+var stopFrame = flag.Int(
+	"stopframe",
+	10,
+	"frame number at which the simulation should stop",
+)
+
 var logger *zap.SugaredLogger
 
 const (
@@ -252,7 +258,7 @@ func Run(ctx context.Context, runId string, execDir string, bearerToken string, 
 		"RUN_ID":         runId,
 		"RUNNER_AUTH":    bearerToken,
 		"RUNNER_ADDRESS": "172.17.0.1" + *listenPort,
-		"STOP_FRAME":     "2", // TODO: make this configurable
+		"STOP_FRAME":     fmt.Sprintf("%d", *stopFrame),
 	}
 	logger.Debugw("Prepared environment variables", "env", env)
 
