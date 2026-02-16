@@ -82,9 +82,9 @@ func main() {
 		config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 		zapLogger, err = config.Build()
 	} else {
-		// Production logger with warn level
+		// Production logger with info level
 		config := zap.NewProductionConfig()
-		config.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
+		config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 		zapLogger, err = config.Build()
 	}
 	if err != nil {
@@ -201,7 +201,7 @@ func main() {
 		logger.Errorw("Failed to start compose stack", "error", err)
 		os.Exit(RunnerErrorExitCode)
 	}
-	logger.Info("Compose stack started successfully")
+	logger.Debug("Compose stack started successfully")
 
 	// Wait for notification or interrupt signal
 	sigChan := make(chan os.Signal, 1)
@@ -210,10 +210,10 @@ func main() {
 	var notification *FrameNotification
 	select {
 	case n := <-frameNotificationChan:
-		logger.Infow("Terminal frame reached, shutting down", "frame_number", n.FrameNumber)
+		logger.Debugw("Terminal frame reached, shutting down", "frame_number", n.FrameNumber)
 		notification = &n
 	case sig := <-sigChan:
-		logger.Infow("Received signal, shutting down", "signal", sig)
+		logger.Debugw("Received signal, shutting down", "signal", sig)
 	}
 
 	// Shutdown HTTP server
