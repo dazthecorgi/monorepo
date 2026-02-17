@@ -1,16 +1,48 @@
 # Quilibrium Simulation Test Environment
 
-This directory contains a Docker Compose setup for running multiple Quilibrium archive nodes in an isolated network for testing purposes.
+This directory contains to run multiple Quilibrium archive nodes locally with Docker for testing purposes.
+
+## Prequisites
+
+- Go toolchain
+- Docker
 
 ## Quick Start
 
 ```
-# Start
-docker compose up -d --build --remove-orphans
-
-# Check logs
-docker compose logs -f
-
-# Stop
-docker compose down -v
+go run .
 ```
+
+See `go run . -help` for more config options.
+
+## Common issues
+
+If you get the following error:
+
+```
+Error response from daemon: all predefined address pools have been fully subnetted
+```
+
+You need to decrease the capacity of each bridge network so that Docker can allocate more networks.
+You can achieve this by adding the following to `/etc/docker/daemon.json`:
+
+```json
+{
+  "default-address-pools" : [
+    {
+      "base" : "172.17.0.0/12",
+      "size" : 20
+    },
+    {
+      "base" : "192.168.0.0/16",
+      "size" : 24
+    }
+  ]
+}
+```
+
+And then run `sudo systemctl restart docker` for the changes to take effect.
+
+Read [this](https://straz.to/2021-09-08-docker-address-pools/) article if you're interested in more details.
+
+
