@@ -5,83 +5,202 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"source.quilibrium.com/quilibrium/monorepo/protobufs"
+	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/mocks"
 )
 
-func TestFrameMonitorCreation(t *testing.T) {
+func TestFrameMonitorHappyPath(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	logger, _ := zap.NewDevelopment()
 	ctx := context.Background()
 
-	nodeAddresses := []string{"localhost:8337", "localhost:8338"}
 	stopFrame := uint64(100)
-	pollInterval := 5 * time.Second
-	gracePeriod := 60 * time.Second
+	nodeAddresses := []string{"node1:8337", "node2:8337"}
+	pollInterval := 50 * time.Millisecond
+	timeout := 5 * time.Second
 
-	monitor := NewFrameMonitor(
+	// Create mock clients
+	mockClient1 := mocks.NewMockGlobalServiceClient(ctrl)
+	mockClient2 := mocks.NewMockGlobalServiceClient(ctrl)
+
+	// Setup expectations: both clients return frames >= stopFrame immediately
+	mockClient1.EXPECT().
+		GetGlobalFrame(gomock.Any(), gomock.Any()).
+		Return(&protobufs.GlobalFrameResponse{
+			Frame: &protobufs.GlobalFrame{
+				Header: &protobufs.GlobalFrameHeader{
+					FrameNumber: stopFrame,
+				},
+			},
+		}, nil).
+		AnyTimes()
+
+	mockClient2.EXPECT().
+		GetGlobalFrame(gomock.Any(), gomock.Any()).
+		Return(&protobufs.GlobalFrameResponse{
+			Frame: &protobufs.GlobalFrame{
+				Header: &protobufs.GlobalFrameHeader{
+					FrameNumber: stopFrame,
+				},
+			},
+		}, nil).
+		AnyTimes()
+
+	clients := map[string]protobufs.GlobalServiceClient{
+		nodeAddresses[0]: mockClient1,
+		nodeAddresses[1]: mockClient2,
+	}
+
+	monitor := NewFrameMonitorWithClients(
 		ctx,
 		logger,
 		stopFrame,
 		nodeAddresses,
 		pollInterval,
-		gracePeriod,
-		true,
+		true, // requireAllNodes
+		timeout,
+		clients,
 	)
 
-	if monitor == nil {
-		t.Fatal("expected monitor to be created")
+	// Start monitoring in a goroutine and wait for completion
+	done := make(chan struct{})
+	start := time.Now()
+
+	go func() {
+		monitor.startMonitoring()
+		close(done)
+	}()
+
+	// Wait for monitoring to complete or timeout
+	select {
+	case <-done:
+		elapsed := time.Since(start)
+		// Should complete quickly (within 500ms), not hitting the timeout
+		if elapsed > 500*time.Millisecond {
+			t.Errorf("monitoring took too long: %v (expected < 500ms)", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitoring did not complete in time")
 	}
 
-	if monitor.stopFrame != stopFrame {
-		t.Errorf("expected stopFrame %d, got %d", stopFrame, monitor.stopFrame)
-	}
+	// Verify all nodes reached stopFrame
+	monitor.statusMutex.RLock()
+	defer monitor.statusMutex.RUnlock()
 
-	if len(monitor.nodeAddresses) != 2 {
-		t.Errorf("expected 2 node addresses, got %d", len(monitor.nodeAddresses))
-	}
+	for _, addr := range nodeAddresses {
+		status, exists := monitor.nodeStatuses[addr]
+		if !exists {
+			t.Errorf("no status found for node %s", addr)
+			continue
+		}
 
-	if monitor.pollInterval != pollInterval {
-		t.Errorf("expected poll interval %v, got %v", pollInterval, monitor.pollInterval)
-	}
+		if status.lastGlobalHeadFrame != stopFrame {
+			t.Errorf("node %s: expected frame %d, got %d",
+				addr, stopFrame, status.lastGlobalHeadFrame)
+		}
 
-	if monitor.gracePeriod != gracePeriod {
-		t.Errorf("expected grace period %v, got %v", gracePeriod, monitor.gracePeriod)
-	}
-
-	if !monitor.requireAllNodes {
-		t.Error("expected requireAllNodes to be true")
+		if status.err != nil {
+			t.Errorf("node %s: expected no error, got %v", addr, status.err)
+		}
 	}
 }
 
-func TestNodeFrameStatusInitialization(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	ctx := context.Background()
+func TestFrameMonitorTimeout(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-	monitor := NewFrameMonitor(
+	logger, _ := zap.NewDevelopment()
+	timeout := 200 * time.Millisecond // Short timeout for fast test
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	stopFrame := uint64(100)
+	nodeAddresses := []string{"node1:8337", "node2:8337"}
+	pollInterval := 50 * time.Millisecond
+
+	// Create mock clients that always fail
+	mockClient1 := mocks.NewMockGlobalServiceClient(ctrl)
+	mockClient2 := mocks.NewMockGlobalServiceClient(ctrl)
+
+	// Setup expectations: both clients always return errors
+	failureErr := status.Error(codes.Unavailable, "connection refused")
+
+	mockClient1.EXPECT().
+		GetGlobalFrame(gomock.Any(), gomock.Any()).
+		Return(nil, failureErr).
+		AnyTimes()
+
+	mockClient2.EXPECT().
+		GetGlobalFrame(gomock.Any(), gomock.Any()).
+		Return(nil, failureErr).
+		AnyTimes()
+
+	clients := map[string]protobufs.GlobalServiceClient{
+		nodeAddresses[0]: mockClient1,
+		nodeAddresses[1]: mockClient2,
+	}
+
+	monitor := NewFrameMonitorWithClients(
 		ctx,
 		logger,
-		100,
-		[]string{"node1:8337", "node2:8337"},
-		5*time.Second,
-		60*time.Second,
-		true,
+		stopFrame,
+		nodeAddresses,
+		pollInterval,
+		true, // requireAllNodes
+		timeout,
+		clients,
 	)
 
-	// Create clients should initialize node statuses
-	// Note: This will fail to connect since nodes don't exist, but should still initialize structures
-	_ = monitor.createNodeClients()
+	// Start monitoring in a goroutine and wait for completion
+	done := make(chan struct{})
+	start := time.Now()
 
-	if len(monitor.nodeStatuses) != 2 {
-		t.Errorf("expected 2 node statuses, got %d", len(monitor.nodeStatuses))
+	go func() {
+		monitor.startMonitoring()
+		close(done)
+	}()
+
+	// Wait for monitoring to complete
+	select {
+	case <-done:
+		elapsed := time.Since(start)
+		// Should take at least the timeout duration
+		if elapsed < timeout {
+			t.Errorf("monitoring completed too quickly: %v (expected >= %v)", elapsed, timeout)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitoring did not complete in time")
 	}
 
-	for addr, status := range monitor.nodeStatuses {
-		if status.address != addr {
-			t.Errorf("expected address %s, got %s", addr, status.address)
+	// Verify all nodes have errors recorded
+	monitor.statusMutex.RLock()
+	defer monitor.statusMutex.RUnlock()
+
+	for _, addr := range nodeAddresses {
+		status, exists := monitor.nodeStatuses[addr]
+		if !exists {
+			t.Errorf("no status found for node %s", addr)
+			continue
 		}
-		if status.lastGlobalHeadFrame != 0 {
-			t.Errorf("expected initial frame to be 0, got %d", status.lastGlobalHeadFrame)
+
+		if status.err == nil {
+			t.Errorf("node %s: expected error, got nil", addr)
+		}
+
+		if status.lastGlobalHeadFrame >= stopFrame {
+			t.Errorf("node %s: expected frame < %d, got %d",
+				addr, stopFrame, status.lastGlobalHeadFrame)
+		}
+
+		if status.consecutiveFailures == 0 {
+			t.Errorf("node %s: expected consecutive failures > 0, got %d",
+				addr, status.consecutiveFailures)
 		}
 	}
-
-	monitor.Close()
 }

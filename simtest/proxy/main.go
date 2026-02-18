@@ -20,7 +20,7 @@ import (
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
-	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/safety"
+	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/testing"
 )
 
 var configDirectory = flag.String(
@@ -48,8 +48,8 @@ type FrameNotification struct {
 	SafetyError string           `json:"safety_error,omitempty"`
 }
 
-func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType NotificationType, frames []*safety.GlobalFrameWrapper) error {
-	safetyError := safety.CheckSafety(frames)
+func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType NotificationType, frames []*testing.GlobalFrameWrapper) error {
+	safetyError := testing.CheckSafety(frames)
 
 	var safetyErrorMsg string
 	if safetyError != nil {
@@ -173,11 +173,11 @@ func main() {
 
 	logger.Info("DHT node running. Press Ctrl+C to stop.")
 
-	globalFrames := make([]*safety.GlobalFrameWrapper, 0, stopFrame)
+	globalFrames := make([]*testing.GlobalFrameWrapper, 0, stopFrame)
 
 	// TODO move these to config
 	pollInterval := 5 * time.Second
-	gracePeriod := 60 * time.Second
+	timeout := 60 * time.Second
 	requireAllNodes := true
 
 	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
@@ -189,7 +189,7 @@ func main() {
 		nodeAddresses,
 		pollInterval,
 		requireAllNodes,
-		gracePeriod,
+		timeout,
 	)
 
 	if err != nil {
@@ -199,7 +199,7 @@ func main() {
 	// Continue collecting frames from BlossomSub for safety checking
 	go func() {
 		for frame := range globalFrameChan {
-			globalFrames = append(globalFrames, &safety.GlobalFrameWrapper{GlobalFrame: frame})
+			globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
 			logger.Debug("received global frame",
 				zap.Uint64("frame_number", frame.Header.FrameNumber))
 		}
@@ -208,7 +208,7 @@ func main() {
 	go func() {
 		for frame := range globalFrameChan {
 			frameNumber := frame.Header.FrameNumber
-			globalFrames = append(globalFrames, &safety.GlobalFrameWrapper{GlobalFrame: frame})
+			globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
 
 			if frameNumber == stopFrame {
 				logger.Info("received terminal frame over gossip network, monitoring all nodes now",

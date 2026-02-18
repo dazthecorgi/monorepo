@@ -29,7 +29,7 @@ type FrameMonitor struct {
 	stopFrame       uint64
 	nodeAddresses   []string
 	pollInterval    time.Duration
-	gracePeriod     time.Duration
+	timeout         time.Duration
 	requireAllNodes bool
 
 	clients      map[string]protobufs.GlobalServiceClient
@@ -46,7 +46,7 @@ func NewFrameMonitor(
 	nodeAddresses []string,
 	pollInterval time.Duration,
 	requireAllNodes bool,
-	gracePeriod time.Duration,
+	timeout time.Duration,
 ) (*FrameMonitor, error) {
 	fm := FrameMonitor{
 		ctx:             ctx,
@@ -54,7 +54,7 @@ func NewFrameMonitor(
 		stopFrame:       stopFrame,
 		nodeAddresses:   nodeAddresses,
 		pollInterval:    pollInterval,
-		gracePeriod:     gracePeriod,
+		timeout:         timeout,
 		requireAllNodes: requireAllNodes,
 		clients:         make(map[string]protobufs.GlobalServiceClient),
 		connections:     make(map[string]*grpc.ClientConn),
@@ -83,6 +83,40 @@ func NewFrameMonitor(
 		}
 	}
 	return &fm, nil
+}
+
+// NewFrameMonitorWithClients creates a FrameMonitor with provided clients for testing
+func NewFrameMonitorWithClients(
+	ctx context.Context,
+	logger *zap.Logger,
+	stopFrame uint64,
+	nodeAddresses []string,
+	pollInterval time.Duration,
+	requireAllNodes bool,
+	timeout time.Duration,
+	clients map[string]protobufs.GlobalServiceClient,
+) *FrameMonitor {
+	fm := &FrameMonitor{
+		ctx:             ctx,
+		logger:          logger,
+		stopFrame:       stopFrame,
+		nodeAddresses:   nodeAddresses,
+		pollInterval:    pollInterval,
+		timeout:         timeout,
+		requireAllNodes: requireAllNodes,
+		clients:         clients,
+		connections:     make(map[string]*grpc.ClientConn), // empty for mocks
+		nodeStatuses:    make(map[string]*NodeFrameStatus),
+	}
+
+	// Initialize node statuses
+	for _, addr := range nodeAddresses {
+		fm.nodeStatuses[addr] = &NodeFrameStatus{
+			address: addr,
+		}
+	}
+
+	return fm
 }
 
 // pollNode queries a single node's current frame status
@@ -173,11 +207,11 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 				timeSinceLastSuccess = now.Sub(status.lastPolled)
 			}
 
-			if timeSinceLastSuccess > fm.gracePeriod {
-				fm.logger.Error("node exceeded grace period",
+			if timeSinceLastSuccess > fm.timeout {
+				fm.logger.Error("node exceeded timeout",
 					zap.String("address", status.address),
 					zap.Duration("time_since_success", timeSinceLastSuccess),
-					zap.Duration("grace_period", fm.gracePeriod),
+					zap.Duration("timeout", fm.timeout),
 					zap.Error(status.err))
 
 				if fm.requireAllNodes {
@@ -185,10 +219,10 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 					failedCount++
 				}
 			} else {
-				fm.logger.Debug("error from node, but within grace period",
+				fm.logger.Debug("error from node, but within timeout",
 					zap.String("address", status.address),
 					zap.Duration("time_since_success", timeSinceLastSuccess),
-					zap.Duration("grace_period", fm.gracePeriod),
+					zap.Duration("timeout", fm.timeout),
 					zap.Error(status.err))
 			}
 		}

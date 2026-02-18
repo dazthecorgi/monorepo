@@ -1,4 +1,4 @@
-package safety
+package testing
 
 import (
 	"errors"
