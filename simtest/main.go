@@ -355,7 +355,6 @@ func main() {
 	if hasFailures(results) {
 		os.Exit(TestRunErrorExitCode)
 	}
-	logger.Info("Test PASSED")
 	os.Exit(0)
 }
 
@@ -494,9 +493,12 @@ func printSummary(results []TestResult, interrupted bool) {
 		}
 	}
 
-	status := "COMPLETED"
+	status := "PASSED"
 	if interrupted {
 		status = "INTERRUPTED"
+	}
+	if failed > 0 {
+		status = "FAILED"
 	}
 
 	logger.Infow("Test Summary",
