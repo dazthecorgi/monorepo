@@ -170,7 +170,11 @@ func main() {
 
 	partition1Str := os.Getenv("PARTITION_1")
 	partition2Str := os.Getenv("PARTITION_2")
+	// Log partition info if provided
 	if partition1Str != "" && partition2Str != "" {
+		logger.Info("Simulating network partition",
+			zap.String("partition_1", partition1Str),
+			zap.String("partition_2", partition2Str))
 		group1 := strings.Split(partition1Str, ",")
 		group2 := strings.Split(partition2Str, ",")
 		for _, p1 := range group1 {
@@ -231,19 +235,12 @@ func main() {
 		logger.Fatal("failed to create frame monitor", zap.Error(err))
 	}
 
-	// Continue collecting frames from BlossomSub for safety checking
-	go func() {
-		for frame := range globalFrameChan {
-			globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
-			logger.Debug("received global frame",
-				zap.Uint64("frame_number", frame.Header.FrameNumber))
-		}
-	}()
-
 	go func() {
 		for frame := range globalFrameChan {
 			frameNumber := frame.Header.FrameNumber
 			globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
+			logger.Debug("received global frame",
+				zap.Uint64("frame_number", frame.Header.FrameNumber))
 
 			if frameNumber == stopFrame {
 				logger.Info("received terminal frame over gossip network, monitoring all nodes now",

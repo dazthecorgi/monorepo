@@ -623,8 +623,7 @@ func dockerComposeUp(ctx context.Context, workDir string, projectName string, en
 	)
 	cmd.Dir = workDir
 
-	// Set environment variables by extending the current environment
-	cmd.Env = os.Environ()
+	cmd.Env = make([]string, 0, len(env))
 	for key, value := range env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 	}
