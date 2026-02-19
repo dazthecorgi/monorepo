@@ -1,4 +1,4 @@
-package main
+package testing
 
 import (
 	"context"
@@ -248,8 +248,8 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 	return allReady
 }
 
-// startMonitoring begins the polling loop and blocks until all nodes reach stop frame or context is cancelled
-func (fm *FrameMonitor) startMonitoring() {
+// StartMonitoring begins the polling loop and blocks until all nodes reach stop frame or context is cancelled
+func (fm *FrameMonitor) StartMonitoring() {
 	fm.logger.Info("starting frame monitoring",
 		zap.Int("node_count", len(fm.nodeAddresses)),
 		zap.Uint64("stop_frame", fm.stopFrame),

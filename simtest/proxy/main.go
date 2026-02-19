@@ -182,7 +182,7 @@ func main() {
 
 	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
 
-	frameMonitor, err := NewFrameMonitor(
+	frameMonitor, err := testing.NewFrameMonitor(
 		ctx,
 		logger,
 		stopFrame,
@@ -214,7 +214,7 @@ func main() {
 				logger.Info("received terminal frame over gossip network, monitoring all nodes now",
 					zap.Uint64("frame_number", frameNumber))
 
-				frameMonitor.startMonitoring()
+				frameMonitor.StartMonitoring()
 				logger.Info("all nodes reached terminal frame")
 
 				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,

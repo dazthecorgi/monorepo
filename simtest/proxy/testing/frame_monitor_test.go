@@ -1,4 +1,4 @@
-package main
+package testing
 
 import (
 	"context"
@@ -73,7 +73,7 @@ func TestFrameMonitorHappyPath(t *testing.T) {
 	start := time.Now()
 
 	go func() {
-		monitor.startMonitoring()
+		monitor.StartMonitoring()
 		close(done)
 	}()
 
@@ -162,7 +162,7 @@ func TestFrameMonitorTimeout(t *testing.T) {
 	start := time.Now()
 
 	go func() {
-		monitor.startMonitoring()
+		monitor.StartMonitoring()
 		close(done)
 	}()
 
