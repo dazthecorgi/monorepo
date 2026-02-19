@@ -15,6 +15,7 @@ import (
 // NodeFrameStatus tracks the frame status for a single node
 type NodeFrameStatus struct {
 	address             string
+	firstPolledAt       time.Time
 	lastGlobalHeadFrame uint64
 	lastPolled          time.Time
 	lastSuccessfulPoll  time.Time
@@ -138,6 +139,9 @@ func (fm *FrameMonitor) pollNode(addr string) {
 
 	status := fm.nodeStatuses[addr]
 	status.lastPolled = time.Now()
+	if status.firstPolledAt.IsZero() {
+		status.firstPolledAt = time.Now()
+	}
 
 	if err != nil {
 		status.err = err
@@ -201,9 +205,9 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 		if status.err != nil {
 			timeSinceLastSuccess := now.Sub(status.lastSuccessfulPoll)
 
-			// If we've never successfully polled this node, use lastPolled instead
+			// If we've never successfully polled this node, measure from first poll attempt
 			if status.lastSuccessfulPoll.IsZero() {
-				timeSinceLastSuccess = now.Sub(status.lastPolled)
+				timeSinceLastSuccess = now.Sub(status.firstPolledAt)
 			}
 
 			if timeSinceLastSuccess > fm.timeout {
