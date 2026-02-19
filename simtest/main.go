@@ -59,6 +59,18 @@ var minNodes = flag.Int(
 	"minimum number of nodes that must reach the stop frame (0 = all nodes)",
 )
 
+var partition1 = flag.String(
+	"partition1",
+	"",
+	"comma-separated node names for partition group 1 (e.g. archive-1,archive-2)",
+)
+
+var partition2 = flag.String(
+	"partition2",
+	"",
+	"comma-separated node names for partition group 2 (e.g. archive-3,archive-4)",
+)
+
 var logger *zap.SugaredLogger
 
 const (
@@ -166,6 +178,11 @@ func generateBearerToken() (string, error) {
 
 func main() {
 	flag.Parse()
+
+	if (*partition1 == "") != (*partition2 == "") {
+		fmt.Fprintf(os.Stderr, "Error: -partition1 and -partition2 must be specified together\n")
+		os.Exit(RunnerErrorExitCode)
+	}
 
 	// Set up logger based on verbose flag
 	var zapLogger *zap.Logger
@@ -416,6 +433,33 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	}
 }
 
+// resolveNodePeerIDs reads the peer ID for each named node from its config.yml comment.
+// Each config.yml starts with a line of the form: "# Peer id: QmXXX..."
+func resolveNodePeerIDs(execDir string, nodeNames []string) ([]string, error) {
+	var peerIDs []string
+	for _, name := range nodeNames {
+		name = strings.TrimSpace(name)
+		configFile := filepath.Join(execDir, "config", name+"-config", "config.yml")
+		data, err := os.ReadFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read config for node %s: %w", name, err)
+		}
+		// First line format: "# Peer id: QmXXX..."
+		firstLine := strings.SplitN(string(data), "\n", 2)[0]
+		firstLine = strings.TrimSpace(firstLine)
+		const prefix = "# Peer id: "
+		if !strings.HasPrefix(firstLine, prefix) {
+			return nil, fmt.Errorf("config for node %s does not contain peer ID on first line (expected '# Peer id: ...')", name)
+		}
+		peerID := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
+		if peerID == "" {
+			return nil, fmt.Errorf("empty peer ID in config for node %s", name)
+		}
+		peerIDs = append(peerIDs, peerID)
+	}
+	return peerIDs, nil
+}
+
 // getArchiveServices discovers archive services from docker-compose.yml
 // Returns a comma-separated list of node addresses (e.g., "archive-1:8337,archive-2:8337")
 func getArchiveServices(ctx context.Context, workDir string) (string, error) {
@@ -470,6 +514,19 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 		"STOP_FRAME":     fmt.Sprintf("%d", stopFrame),
 		"NODE_ADDRESSES": nodeAddresses,
 		"MIN_NODES":      fmt.Sprintf("%d", *minNodes),
+	}
+
+	if *partition1 != "" {
+		peerIDs1, err := resolveNodePeerIDs(execDir, strings.Split(*partition1, ","))
+		if err != nil {
+			return fmt.Errorf("failed to resolve partition1 peer IDs: %w", err)
+		}
+		peerIDs2, err := resolveNodePeerIDs(execDir, strings.Split(*partition2, ","))
+		if err != nil {
+			return fmt.Errorf("failed to resolve partition2 peer IDs: %w", err)
+		}
+		env["PARTITION_1"] = strings.Join(peerIDs1, ",")
+		env["PARTITION_2"] = strings.Join(peerIDs2, ",")
 	}
 
 	// Start services with environment variables

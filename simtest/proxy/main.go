@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"source.quilibrium.com/quilibrium/monorepo/config"
@@ -166,6 +167,30 @@ func main() {
 
 	globalFrameChan := make(chan *protobufs.GlobalFrame, 100)
 	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan)
+
+	partition1Str := os.Getenv("PARTITION_1")
+	partition2Str := os.Getenv("PARTITION_2")
+	if partition1Str != "" && partition2Str != "" {
+		group1 := strings.Split(partition1Str, ",")
+		group2 := strings.Split(partition2Str, ",")
+		for _, p1 := range group1 {
+			for _, p2 := range group2 {
+				pid1, err := peer.Decode(strings.TrimSpace(p1))
+				if err != nil {
+					logger.Error("failed to decode partition1 peer ID",
+						zap.String("peer_id", p1), zap.Error(err))
+					continue
+				}
+				pid2, err := peer.Decode(strings.TrimSpace(p2))
+				if err != nil {
+					logger.Error("failed to decode partition2 peer ID",
+						zap.String("peer_id", p2), zap.Error(err))
+					continue
+				}
+				blossomSub.PartitionPeers([]byte(pid1), []byte(pid2))
+			}
+		}
+	}
 
 	if err := blossomSub.SubscribeToAllMessages(); err != nil {
 		logger.Fatal("failed to subscribe to all messages", zap.Error(err))
