@@ -72,7 +72,8 @@ type PubSub struct {
 
 	tracer *pubsubTracer
 
-	peerFilter PeerFilter
+	peerFilter    PeerFilter
+	forwardFilter ForwardFilter
 
 	// softMaxMessageSize is the maximum size of a single message fragment that
 	// we will attempt to send.
@@ -274,6 +275,7 @@ func NewPubSub(ctx context.Context, h host.Host, rt PubSubRouter, opts ...Option
 		rt:                    rt,
 		val:                   newValidation(),
 		peerFilter:            DefaultPeerFilter,
+		forwardFilter:         DefaultForwardFilter,
 		disc:                  &discover{},
 		softMaxMessageSize:    DefaultSoftMaxMessageSize,
 		hardMaxMessageSize:    DefaultHardMaxMessageSize,
@@ -382,6 +384,21 @@ type PeerFilter func(pid peer.ID, bitmask []byte) bool
 func WithPeerFilter(filter PeerFilter) Option {
 	return func(p *PubSub) error {
 		p.peerFilter = filter
+		return nil
+	}
+}
+
+// ForwardFilter is called before forwarding a message received from `from` to `to`.
+// Return true to allow forwarding, false to suppress it.
+type ForwardFilter func(from, to peer.ID) bool
+
+// DefaultForwardFilter allows all forwarding.
+func DefaultForwardFilter(from, to peer.ID) bool { return true }
+
+// WithForwardFilter sets a per-forwarding-pair filter on the router.
+func WithForwardFilter(filter ForwardFilter) Option {
+	return func(p *PubSub) error {
+		p.forwardFilter = filter
 		return nil
 	}
 }

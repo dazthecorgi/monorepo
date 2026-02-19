@@ -49,6 +49,36 @@ const (
 // Used by Wire for dependency injection
 type ConfigDir string
 
+// partitionedPairKey is a canonical, order-independent key for a partitioned peer pair.
+// The lexicographically smaller peer.ID is always stored in Lo.
+type partitionedPairKey struct {
+	Lo peer.ID
+	Hi peer.ID
+}
+
+func newPartitionedPairKey(a, b peer.ID) partitionedPairKey {
+	if a < b {
+		return partitionedPairKey{Lo: a, Hi: b}
+	}
+	return partitionedPairKey{Lo: b, Hi: a}
+}
+
+type networkPartitioner struct {
+	mu             sync.RWMutex
+	partitionedPairs map[partitionedPairKey]struct{}
+}
+
+func newNetworkPartitioner() *networkPartitioner {
+	return &networkPartitioner{partitionedPairs: make(map[partitionedPairKey]struct{})}
+}
+
+func (ns *networkPartitioner) forwardFilter(from, to peer.ID) bool {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	_, blocked := ns.partitionedPairs[newPartitionedPairKey(from, to)]
+	return !blocked
+}
+
 type appScore struct {
 	expire time.Time
 	score  float64
@@ -76,6 +106,7 @@ type BlossomSubProxy struct {
 	dht                 *dht.IpfsDHT
 	configDir           ConfigDir
 	globalFrameChan     chan<- *protobufs.GlobalFrame
+	partitioner         *networkPartitioner
 }
 
 var ErrNoPeersAvailable = errors.New("no peers available")
@@ -91,6 +122,8 @@ func NewBlossomSubProxy(
 
 	logger = logger.With(zap.String("process", "master"))
 	listenAddr := p2pConfig.ListenMultiaddr
+
+	partitioner := newNetworkPartitioner()
 
 	opts := []libp2pconfig.Option{
 		libp2p.ListenAddrStrings(listenAddr),
@@ -135,6 +168,7 @@ func NewBlossomSubProxy(
 		derivedPeerID:       derivedPeerId,
 		configDir:           configDir,
 		globalFrameChan:     globalFrameChan,
+		partitioner:           partitioner,
 	}
 
 	h, err := libp2p.New(opts...)
@@ -170,6 +204,7 @@ func NewBlossomSubProxy(
 
 	blossomOpts := []blossomsub.Option{
 		blossomsub.WithStrictSignatureVerification(true),
+		blossomsub.WithForwardFilter(partitioner.forwardFilter),
 	}
 
 	if tracer != nil {
@@ -704,6 +739,33 @@ func toBlossomSubParams(
 		IDontWantMessageTTL:       p2pConfig.IDontWantMessageTTL,
 		SlowHeartbeatWarning:      0.1,
 	}
+}
+
+// PartitionPeers suppresses pub/sub forwarding between peerA and peerB.
+// Both peers remain connected to the proxy; only messages between them are blocked.
+// The operation is idempotent. peerA and peerB are raw peer.ID bytes.
+func (b *BlossomSubProxy) PartitionPeers(peerA, peerB []byte) {
+	pidA, pidB := peer.ID(peerA), peer.ID(peerB)
+	b.partitioner.mu.Lock()
+	b.partitioner.partitionedPairs[newPartitionedPairKey(pidA, pidB)] = struct{}{}
+	b.partitioner.mu.Unlock()
+	b.logger.Info("partitioned peers",
+		zap.String("peer_a", pidA.String()),
+		zap.String("peer_b", pidB.String()),
+	)
+}
+
+// UnpartitionPeers removes the partition between peerA and peerB,
+// allowing their messages to flow through the proxy again. Idempotent.
+func (b *BlossomSubProxy) UnpartitionPeers(peerA, peerB []byte) {
+	pidA, pidB := peer.ID(peerA), peer.ID(peerB)
+	b.partitioner.mu.Lock()
+	delete(b.partitioner.partitionedPairs, newPartitionedPairKey(pidA, pidB))
+	b.partitioner.mu.Unlock()
+	b.logger.Info("unpartitioned peers",
+		zap.String("peer_a", pidA.String()),
+		zap.String("peer_b", pidB.String()),
+	)
 }
 
 // Close implements p2p.PubSub.
