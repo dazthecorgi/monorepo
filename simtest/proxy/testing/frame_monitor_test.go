@@ -63,7 +63,7 @@ func TestFrameMonitorHappyPath(t *testing.T) {
 		stopFrame,
 		nodeAddresses,
 		pollInterval,
-		true, // requireAllNodes
+		2, // minNodes
 		timeout,
 		clients,
 	)
@@ -152,7 +152,7 @@ func TestFrameMonitorTimeout(t *testing.T) {
 		stopFrame,
 		nodeAddresses,
 		pollInterval,
-		true, // requireAllNodes
+		2, // minNodes
 		timeout,
 		clients,
 	)

@@ -24,13 +24,13 @@ type NodeFrameStatus struct {
 
 // FrameMonitor polls multiple nodes and tracks when they all reach a target frame
 type FrameMonitor struct {
-	ctx             context.Context
-	logger          *zap.Logger
-	stopFrame       uint64
-	nodeAddresses   []string
-	pollInterval    time.Duration
-	timeout         time.Duration
-	requireAllNodes bool
+	ctx           context.Context
+	logger        *zap.Logger
+	stopFrame     uint64
+	nodeAddresses []string
+	pollInterval  time.Duration
+	timeout       time.Duration
+	minNodes      int
 
 	clients      map[string]protobufs.GlobalServiceClient
 	connections  map[string]*grpc.ClientConn
@@ -45,20 +45,20 @@ func NewFrameMonitor(
 	stopFrame uint64,
 	nodeAddresses []string,
 	pollInterval time.Duration,
-	requireAllNodes bool,
+	minNodes int,
 	timeout time.Duration,
 ) (*FrameMonitor, error) {
 	fm := FrameMonitor{
-		ctx:             ctx,
-		logger:          logger,
-		stopFrame:       stopFrame,
-		nodeAddresses:   nodeAddresses,
-		pollInterval:    pollInterval,
-		timeout:         timeout,
-		requireAllNodes: requireAllNodes,
-		clients:         make(map[string]protobufs.GlobalServiceClient),
-		connections:     make(map[string]*grpc.ClientConn),
-		nodeStatuses:    make(map[string]*NodeFrameStatus),
+		ctx:           ctx,
+		logger:        logger,
+		stopFrame:     stopFrame,
+		nodeAddresses: nodeAddresses,
+		pollInterval:  pollInterval,
+		timeout:       timeout,
+		minNodes:      minNodes,
+		clients:       make(map[string]protobufs.GlobalServiceClient),
+		connections:   make(map[string]*grpc.ClientConn),
+		nodeStatuses:  make(map[string]*NodeFrameStatus),
 	}
 
 	for _, addr := range fm.nodeAddresses {
@@ -92,21 +92,21 @@ func NewFrameMonitorWithClients(
 	stopFrame uint64,
 	nodeAddresses []string,
 	pollInterval time.Duration,
-	requireAllNodes bool,
+	minNodes int,
 	timeout time.Duration,
 	clients map[string]protobufs.GlobalServiceClient,
 ) *FrameMonitor {
 	fm := &FrameMonitor{
-		ctx:             ctx,
-		logger:          logger,
-		stopFrame:       stopFrame,
-		nodeAddresses:   nodeAddresses,
-		pollInterval:    pollInterval,
-		timeout:         timeout,
-		requireAllNodes: requireAllNodes,
-		clients:         clients,
-		connections:     make(map[string]*grpc.ClientConn), // empty for mocks
-		nodeStatuses:    make(map[string]*NodeFrameStatus),
+		ctx:           ctx,
+		logger:        logger,
+		stopFrame:     stopFrame,
+		nodeAddresses: nodeAddresses,
+		pollInterval:  pollInterval,
+		timeout:       timeout,
+		minNodes:      minNodes,
+		clients:       clients,
+		connections:   make(map[string]*grpc.ClientConn), // empty for mocks
+		nodeStatuses:  make(map[string]*NodeFrameStatus),
 	}
 
 	// Initialize node statuses
@@ -176,14 +176,13 @@ func (fm *FrameMonitor) pollAllNodes() {
 	wg.Wait()
 }
 
-// checkAllNodesReachedStopFrame checks if all nodes have reached the stop frame
+// checkAllNodesReachedStopFrame checks if enough nodes have reached the stop frame
 // Returns true if the condition is met and monitoring should stop
 func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 	fm.statusMutex.RLock()
 	defer fm.statusMutex.RUnlock()
 
 	now := time.Now()
-	allReady := true
 	readyCount := 0
 	failedCount := 0
 	var notReadyNodes []string
@@ -213,11 +212,7 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 					zap.Duration("time_since_success", timeSinceLastSuccess),
 					zap.Duration("timeout", fm.timeout),
 					zap.Error(status.err))
-
-				if fm.requireAllNodes {
-					// If we require all nodes, this is a failure condition
-					failedCount++
-				}
+				failedCount++
 			} else {
 				fm.logger.Debug("error from node, but within timeout",
 					zap.String("address", status.address),
@@ -228,7 +223,11 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 		}
 
 		notReadyNodes = append(notReadyNodes, status.address)
-		allReady = false
+	}
+
+	// Enough nodes already reached the stop frame
+	if readyCount >= fm.minNodes {
+		return true
 	}
 
 	// Log summary
@@ -236,16 +235,19 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 		zap.Int("ready", readyCount),
 		zap.Int("not_ready", len(notReadyNodes)),
 		zap.Int("failed", failedCount),
-		zap.Strings("not_ready_nodes", notReadyNodes),
-		zap.Bool("all_ready", allReady))
+		zap.Int("min_nodes", fm.minNodes),
+		zap.Strings("not_ready_nodes", notReadyNodes))
 
-	// If we require all nodes and any have failed beyond grace period, fail immediately
-	if fm.requireAllNodes && failedCount > 0 {
-		fm.logger.Error("required nodes failed, aborting")
-		return true // Stop monitoring, will be handled as error
+	// Impossible to reach minimum even if all remaining non-failed nodes succeed
+	if len(fm.nodeAddresses)-failedCount < fm.minNodes {
+		fm.logger.Error("insufficient nodes available to reach minimum, aborting",
+			zap.Int("min_nodes", fm.minNodes),
+			zap.Int("failed", failedCount),
+			zap.Int("total", len(fm.nodeAddresses)))
+		return true
 	}
 
-	return allReady
+	return false
 }
 
 // StartMonitoring begins the polling loop and blocks until all nodes reach stop frame or context is cancelled

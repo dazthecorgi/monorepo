@@ -178,9 +178,19 @@ func main() {
 	// TODO move these to config
 	pollInterval := 5 * time.Second
 	timeout := 60 * time.Second
-	requireAllNodes := true
 
 	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
+
+	minNodesStr := os.Getenv("MIN_NODES")
+	minNodes := len(nodeAddresses)
+	if minNodesStr != "" {
+		n, err := strconv.Atoi(minNodesStr)
+		if err != nil || n <= 0 {
+			fmt.Fprintf(os.Stderr, "Error: invalid MIN_NODES value '%s'\n", minNodesStr)
+			os.Exit(1)
+		}
+		minNodes = n
+	}
 
 	frameMonitor, err := testing.NewFrameMonitor(
 		ctx,
@@ -188,7 +198,7 @@ func main() {
 		stopFrame,
 		nodeAddresses,
 		pollInterval,
-		requireAllNodes,
+		minNodes,
 		timeout,
 	)
 

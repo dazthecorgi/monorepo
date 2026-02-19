@@ -53,6 +53,12 @@ var parallel = flag.Int(
 	"number of test runs to execute in parallel",
 )
 
+var minNodes = flag.Int(
+	"minnodes",
+	0,
+	"minimum number of nodes that must reach the stop frame (0 = all nodes)",
+)
+
 var logger *zap.SugaredLogger
 
 const (
@@ -464,6 +470,7 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 		"RUNNER_ADDRESS": "host.docker.internal:" + strings.TrimPrefix(*listenPort, ":"),
 		"STOP_FRAME":     fmt.Sprintf("%d", stopFrame),
 		"NODE_ADDRESSES": nodeAddresses,
+		"MIN_NODES":      fmt.Sprintf("%d", *minNodes),
 	}
 
 	// Start services with environment variables
