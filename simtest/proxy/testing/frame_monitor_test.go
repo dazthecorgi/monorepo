@@ -117,8 +117,7 @@ func TestFrameMonitorTimeout(t *testing.T) {
 
 	logger, _ := zap.NewDevelopment()
 	timeout := 200 * time.Millisecond // Short timeout for fast test
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	ctx := context.Background()
 
 	stopFrame := uint64(100)
 	nodeAddresses := []string{"node1:8337", "node2:8337"}
