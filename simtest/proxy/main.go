@@ -37,7 +37,7 @@ var network = flag.Uint(
 	"sets the active network for the node (mainnet = 0, primary testnet = 1)",
 )
 
-func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType shared.NotificationType, frames []*testing.GlobalFrameWrapper) error {
+func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType shared.NotificationType, frames []*testing.GlobalFrameWrapper, nodesReachedStopFrame, totalNodes int) error {
 	safetyError := testing.CheckSafety(frames)
 
 	var safetyErrorMsg string
@@ -47,10 +47,12 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, fr
 	}
 
 	notification := shared.FrameNotification{
-		RunID:       runID,
-		FrameNumber: frameNumber,
-		Type:        notifType,
-		SafetyError: safetyErrorMsg,
+		RunID:                 runID,
+		FrameNumber:           frameNumber,
+		Type:                  notifType,
+		SafetyError:           safetyErrorMsg,
+		NodesReachedStopFrame: nodesReachedStopFrame,
+		TotalNodes:            totalNodes,
 	}
 
 	jsonData, err := json.Marshal(notification)
@@ -234,11 +236,14 @@ func main() {
 				logger.Info("received terminal frame over gossip network, monitoring all nodes now",
 					zap.Uint64("frame_number", frameNumber))
 
-				frameMonitor.StartMonitoring()
-				logger.Info("all nodes reached terminal frame")
+				nodesReachedStopFrame, totalNodes := frameMonitor.StartMonitoring()
+				logger.Info("all nodes reached terminal frame",
+					zap.Int("nodes_reached_stop_frame", nodesReachedStopFrame),
+					zap.Int("total_nodes", totalNodes))
 
 				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
-					frameNumber, shared.NotificationTypeTerminalFrame, globalFrames)
+					frameNumber, shared.NotificationTypeTerminalFrame, globalFrames,
+					nodesReachedStopFrame, totalNodes)
 
 				cancel(err)
 				return

@@ -254,10 +254,26 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 	return false
 }
 
-// StartMonitoring begins the polling loop and blocks until all nodes reach stop frame or context is cancelled
-func (fm *FrameMonitor) StartMonitoring() {
+// countNodesReachedStopFrame returns the number of nodes that have reached the stop frame.
+// Caller must not hold statusMutex.
+func (fm *FrameMonitor) countNodesReachedStopFrame() int {
+	fm.statusMutex.RLock()
+	defer fm.statusMutex.RUnlock()
+	count := 0
+	for _, status := range fm.nodeStatuses {
+		if status.lastGlobalHeadFrame >= fm.stopFrame && status.err == nil {
+			count++
+		}
+	}
+	return count
+}
+
+// StartMonitoring begins the polling loop and blocks until all nodes reach stop frame or context is cancelled.
+// Returns the number of nodes that reached the stop frame and the total number of nodes.
+func (fm *FrameMonitor) StartMonitoring() (int, int) {
+	total := len(fm.nodeAddresses)
 	fm.logger.Info("starting frame monitoring",
-		zap.Int("node_count", len(fm.nodeAddresses)),
+		zap.Int("node_count", total),
 		zap.Uint64("stop_frame", fm.stopFrame),
 		zap.Duration("poll_interval", fm.pollInterval))
 
@@ -268,7 +284,7 @@ func (fm *FrameMonitor) StartMonitoring() {
 	fm.pollAllNodes()
 	if fm.checkAllNodesReachedStopFrame() {
 		fm.logger.Debug("all nodes reached stop frame on initial poll")
-		return
+		return fm.countNodesReachedStopFrame(), total
 	}
 
 	for {
@@ -276,11 +292,11 @@ func (fm *FrameMonitor) StartMonitoring() {
 		case <-ticker.C:
 			fm.pollAllNodes()
 			if fm.checkAllNodesReachedStopFrame() {
-				return
+				return fm.countNodesReachedStopFrame(), total
 			}
 		case <-fm.ctx.Done():
 			fm.logger.Debug("monitoring cancelled")
-			return
+			return fm.countNodesReachedStopFrame(), total
 		}
 	}
 }

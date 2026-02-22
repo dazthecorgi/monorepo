@@ -401,7 +401,11 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	var notification *shared.FrameNotification
 	select {
 	case n := <-notifChan:
-		logger.Debugw("Terminal frame reached", "run_id", runID, "frame_number", n.FrameNumber)
+		logger.Debugw("Terminal frame reached",
+			"run_id", runID,
+			"frame_number", n.FrameNumber,
+			"nodes_reached_stop_frame", n.NodesReachedStopFrame,
+			"total_nodes", n.TotalNodes)
 		notification = &n
 	case <-ctx.Done():
 		logger.Debugw("Test run cancelled", "run_id", runID, "reason", ctx.Err())

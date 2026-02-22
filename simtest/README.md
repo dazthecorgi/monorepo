@@ -15,7 +15,7 @@ go run .
 
 See `go run . -help` for more config options.
 
-## Common issues
+## Common Issues
 
 If you get the following error:
 
