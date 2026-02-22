@@ -22,6 +22,7 @@ import (
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/testing"
+	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
 var configDirectory = flag.String(
@@ -36,20 +37,7 @@ var network = flag.Uint(
 	"sets the active network for the node (mainnet = 0, primary testnet = 1)",
 )
 
-type NotificationType string
-
-const (
-	NotificationTypeTerminalFrame  NotificationType = "terminal_frame_reached"
-)
-
-type FrameNotification struct {
-	RunID        string           `json:"run_id"`
-	FrameNumber  uint64           `json:"frame_number"`
-	Type         NotificationType `json:"type"`
-	SafetyError string           `json:"safety_error,omitempty"`
-}
-
-func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType NotificationType, frames []*testing.GlobalFrameWrapper) error {
+func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType shared.NotificationType, frames []*testing.GlobalFrameWrapper) error {
 	safetyError := testing.CheckSafety(frames)
 
 	var safetyErrorMsg string
@@ -58,10 +46,10 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, fr
 		logger.Error("Safety violation detected", zap.String("error", safetyErrorMsg))
 	}
 
-	notification := FrameNotification{
-		RunID:        runID,
-		FrameNumber:  frameNumber,
-		Type:         notifType,
+	notification := shared.FrameNotification{
+		RunID:       runID,
+		FrameNumber: frameNumber,
+		Type:        notifType,
 		SafetyError: safetyErrorMsg,
 	}
 
@@ -250,7 +238,7 @@ func main() {
 				logger.Info("all nodes reached terminal frame")
 
 				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
-					frameNumber, NotificationTypeTerminalFrame, globalFrames)
+					frameNumber, shared.NotificationTypeTerminalFrame, globalFrames)
 
 				cancel(err)
 				return

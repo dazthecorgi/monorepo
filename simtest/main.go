@@ -21,6 +21,8 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+
+	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
 var workingDir = flag.String(
@@ -79,19 +81,6 @@ const (
 	InterruptExitCode    = 130
 )
 
-type NotificationType string
-
-const (
-	NotificationTypeTerminalFrame NotificationType = "terminal_frame_reached"
-)
-
-type FrameNotification struct {
-	RunID       string           `json:"run_id,omitempty"`
-	FrameNumber uint64           `json:"frame_number"`
-	Type        NotificationType `json:"type"`
-	SafetyError string           `json:"safety_error,omitempty"`
-}
-
 type TestResult struct {
 	RunID        string
 	Success      bool
@@ -101,16 +90,16 @@ type TestResult struct {
 
 type NotificationRouter struct {
 	mu       sync.RWMutex
-	channels map[string]chan FrameNotification
+	channels map[string]chan shared.FrameNotification
 }
 
 func NewNotificationRouter() *NotificationRouter {
 	return &NotificationRouter{
-		channels: make(map[string]chan FrameNotification),
+		channels: make(map[string]chan shared.FrameNotification),
 	}
 }
 
-func (nr *NotificationRouter) Register(runID string, ch chan FrameNotification) {
+func (nr *NotificationRouter) Register(runID string, ch chan shared.FrameNotification) {
 	nr.mu.Lock()
 	defer nr.mu.Unlock()
 	nr.channels[runID] = ch
@@ -122,7 +111,7 @@ func (nr *NotificationRouter) Unregister(runID string) {
 	delete(nr.channels, runID)
 }
 
-func (nr *NotificationRouter) Route(notification FrameNotification) {
+func (nr *NotificationRouter) Route(notification shared.FrameNotification) {
 	nr.mu.RLock()
 	defer nr.mu.RUnlock()
 
@@ -262,7 +251,7 @@ func main() {
 			return
 		}
 
-		var notification FrameNotification
+		var notification shared.FrameNotification
 		if err := json.NewDecoder(r.Body).Decode(&notification); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to decode notification: %v", err), http.StatusBadRequest)
 			return
@@ -273,7 +262,7 @@ func main() {
 		logger.Debugw("Received notification", "run_id", notification.RunID, "frame_number", notification.FrameNumber, "type", notification.Type, "safety_error", notification.SafetyError)
 
 		// Route notification to correct test run
-		if notification.Type == NotificationTypeTerminalFrame {
+		if notification.Type == shared.NotificationTypeTerminalFrame {
 			router.Route(notification)
 		}
 	})
@@ -377,7 +366,7 @@ func main() {
 
 func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry) TestResult {
 	// Create notification channel for this run
-	notifChan := make(chan FrameNotification, 10)
+	notifChan := make(chan shared.FrameNotification, 10)
 	router.Register(runID, notifChan)
 	defer router.Unregister(runID)
 	defer close(notifChan)
@@ -409,7 +398,7 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	}()
 
 	// Wait for notification or context cancellation
-	var notification *FrameNotification
+	var notification *shared.FrameNotification
 	select {
 	case n := <-notifChan:
 		logger.Debugw("Terminal frame reached", "run_id", runID, "frame_number", n.FrameNumber)

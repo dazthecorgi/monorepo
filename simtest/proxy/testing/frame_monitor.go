@@ -267,7 +267,7 @@ func (fm *FrameMonitor) StartMonitoring() {
 	// Do an initial poll immediately
 	fm.pollAllNodes()
 	if fm.checkAllNodesReachedStopFrame() {
-		fm.logger.Info("all nodes reached stop frame on initial poll")
+		fm.logger.Debug("all nodes reached stop frame on initial poll")
 		return
 	}
 
@@ -279,7 +279,7 @@ func (fm *FrameMonitor) StartMonitoring() {
 				return
 			}
 		case <-fm.ctx.Done():
-			fm.logger.Info("monitoring cancelled")
+			fm.logger.Debug("monitoring cancelled")
 			return
 		}
 	}
