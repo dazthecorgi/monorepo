@@ -41,5 +41,5 @@ lint_and_test
 
 if [[ "$SHORT" == false ]]; then
     cd "$SCRIPT_DIR"
-    run go run . -verbose -stopframe=2 -partition1=archive-1,archive-2,archive-3 -partition2=archive-4
+    run go run . -verbose -stopframe=2 -frame-partitions='[{"frame":0,"partition1":["archive-1","archive-2","archive-3"],"partition2":["archive-4"]}]'
 fi

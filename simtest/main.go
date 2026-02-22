@@ -61,16 +61,10 @@ var minNodes = flag.Int(
 	"minimum number of nodes that must reach the stop frame (0 = all nodes)",
 )
 
-var partition1 = flag.String(
-	"partition1",
+var framePartitions = flag.String(
+	"frame-partitions",
 	"",
-	"comma-separated node names for partition group 1 (e.g. archive-1,archive-2)",
-)
-
-var partition2 = flag.String(
-	"partition2",
-	"",
-	"comma-separated node names for partition group 2 (e.g. archive-3,archive-4)",
+	`JSON array of per-frame partition configs, e.g. '[{"frame":5,"partition1":["archive-1"],"partition2":["archive-3"]}]'`,
 )
 
 var logger *zap.SugaredLogger
@@ -167,11 +161,6 @@ func generateBearerToken() (string, error) {
 
 func main() {
 	flag.Parse()
-
-	if (*partition1 == "") != (*partition2 == "") {
-		fmt.Fprintf(os.Stderr, "Error: -partition1 and -partition2 must be specified together\n")
-		os.Exit(RunnerErrorExitCode)
-	}
 
 	// Set up logger based on verbose flag
 	var zapLogger *zap.Logger
@@ -509,17 +498,35 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 		"MIN_NODES":      fmt.Sprintf("%d", *minNodes),
 	}
 
-	if *partition1 != "" {
-		peerIDs1, err := resolveNodePeerIDs(execDir, strings.Split(*partition1, ","))
+	if *framePartitions != "" {
+		parsed, err := shared.ParseFramePartitions(*framePartitions)
 		if err != nil {
-			return fmt.Errorf("failed to resolve partition1 peer IDs: %w", err)
+			return fmt.Errorf("failed to parse -frame-partitions: %w", err)
 		}
-		peerIDs2, err := resolveNodePeerIDs(execDir, strings.Split(*partition2, ","))
+		// Resolve node names to peer IDs
+		resolved := make([]shared.FramePartitionEntry, 0, len(parsed))
+		for _, e := range parsed {
+			if len(e.Partition1) > 0 {
+				ids, err := resolveNodePeerIDs(execDir, e.Partition1)
+				if err != nil {
+					return fmt.Errorf("failed to resolve frame %d partition1: %w", e.Frame, err)
+				}
+				e.Partition1 = ids
+			}
+			if len(e.Partition2) > 0 {
+				ids, err := resolveNodePeerIDs(execDir, e.Partition2)
+				if err != nil {
+					return fmt.Errorf("failed to resolve frame %d partition2: %w", e.Frame, err)
+				}
+				e.Partition2 = ids
+			}
+			resolved = append(resolved, e)
+		}
+		serialized, err := json.Marshal(resolved)
 		if err != nil {
-			return fmt.Errorf("failed to resolve partition2 peer IDs: %w", err)
+			return fmt.Errorf("failed to serialize frame-partitions: %w", err)
 		}
-		env["PARTITION_1"] = strings.Join(peerIDs1, ",")
-		env["PARTITION_2"] = strings.Join(peerIDs2, ",")
+		env["FRAME_PARTITIONS"] = string(serialized)
 	}
 
 	// Start services with environment variables

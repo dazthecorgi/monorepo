@@ -158,31 +158,35 @@ func main() {
 	globalFrameChan := make(chan *protobufs.GlobalFrame, 100)
 	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan)
 
-	partition1Str := os.Getenv("PARTITION_1")
-	partition2Str := os.Getenv("PARTITION_2")
-	// Log partition info if provided
-	if partition1Str != "" && partition2Str != "" {
-		logger.Info("Simulating network partition",
-			zap.String("partition_1", partition1Str),
-			zap.String("partition_2", partition2Str))
-		group1 := strings.Split(partition1Str, ",")
-		group2 := strings.Split(partition2Str, ",")
-		for _, p1 := range group1 {
-			for _, p2 := range group2 {
-				pid1, err := peer.Decode(strings.TrimSpace(p1))
-				if err != nil {
-					logger.Error("failed to decode partition1 peer ID",
-						zap.String("peer_id", p1), zap.Error(err))
-					continue
+	// Parse per-frame partition schedule from FRAME_PARTITIONS env var
+	var framePartitions map[uint64]shared.FramePartitionEntry
+	if fpStr := os.Getenv("FRAME_PARTITIONS"); fpStr != "" {
+		var err error
+		framePartitions, err = shared.ParseFramePartitions(fpStr)
+		if err != nil {
+			logger.Fatal("failed to parse FRAME_PARTITIONS", zap.Error(err))
+		}
+		// Validate that all peer IDs are decodable
+		for _, e := range framePartitions {
+			for _, p := range e.Partition1 {
+				if _, err := peer.Decode(strings.TrimSpace(p)); err != nil {
+					logger.Fatal("invalid peer ID in FRAME_PARTITIONS partition1",
+						zap.String("peer_id", p), zap.Error(err))
 				}
-				pid2, err := peer.Decode(strings.TrimSpace(p2))
-				if err != nil {
-					logger.Error("failed to decode partition2 peer ID",
-						zap.String("peer_id", p2), zap.Error(err))
-					continue
-				}
-				blossomSub.PartitionPeers([]byte(pid1), []byte(pid2))
 			}
+			for _, p := range e.Partition2 {
+				if _, err := peer.Decode(strings.TrimSpace(p)); err != nil {
+					logger.Fatal("invalid peer ID in FRAME_PARTITIONS partition2",
+						zap.String("peer_id", p), zap.Error(err))
+				}
+			}
+		}
+		logger.Info("loaded frame partition schedule",
+			zap.Int("entries", len(framePartitions)))
+
+		// Apply frame-0 entry immediately at startup
+		if entry, ok := framePartitions[0]; ok {
+			blossomSub.ApplyPartition(entry.Partition1, entry.Partition2)
 		}
 	}
 
@@ -231,6 +235,12 @@ func main() {
 			globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
 			logger.Debug("received global frame",
 				zap.Uint64("frame_number", frame.Header.FrameNumber))
+
+			if framePartitions != nil {
+				if entry, ok := framePartitions[frameNumber]; ok {
+					blossomSub.ApplyPartition(entry.Partition1, entry.Partition2)
+				}
+			}
 
 			if frameNumber == stopFrame {
 				logger.Info("received terminal frame over gossip network, monitoring all nodes now",

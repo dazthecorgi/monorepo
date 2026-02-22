@@ -41,8 +41,7 @@ You can achieve this by adding the following to `/etc/docker/daemon.json`:
 }
 ```
 
-And then run `sudo systemctl restart docker` for the changes to take effect.
+And then run `sudo systemctl restart docker` to apply the changes.
 
 Read [this](https://straz.to/2021-09-08-docker-address-pools/) article if you're interested in more details.
-
 

@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -766,6 +767,28 @@ func (b *BlossomSubProxy) UnpartitionPeers(peerA, peerB []byte) {
 		zap.String("peer_a", pidA.String()),
 		zap.String("peer_b", pidB.String()),
 	)
+}
+
+// ClearPartitions removes all network partitions, allowing all peers to communicate freely.
+func (b *BlossomSubProxy) ClearPartitions() {
+	b.partitioner.mu.Lock()
+	b.partitioner.partitionedPairs = make(map[partitionedPairKey]struct{})
+	b.partitioner.mu.Unlock()
+	b.logger.Info("cleared all network partitions")
+}
+
+// ApplyPartition replaces the current partition state: clears all existing
+// partitions, then blocks forwarding between every pair in group1 x group2.
+// Each element is a base58-encoded peer ID string.
+func (b *BlossomSubProxy) ApplyPartition(group1, group2 []string) {
+	b.ClearPartitions()
+	for _, p1 := range group1 {
+		for _, p2 := range group2 {
+			pid1, _ := peer.Decode(strings.TrimSpace(p1))
+			pid2, _ := peer.Decode(strings.TrimSpace(p2))
+			b.PartitionPeers([]byte(pid1), []byte(pid2))
+		}
+	}
 }
 
 // Close implements p2p.PubSub.
