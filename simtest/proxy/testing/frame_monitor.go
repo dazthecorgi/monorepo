@@ -311,3 +311,61 @@ func (fm *FrameMonitor) Close() {
 		}
 	}
 }
+
+// FetchCommittedFrames fetches all frames 1..stopFrame from every node that has
+// reached the stop frame. 
+// Call this after StartMonitoring() returns.
+func (fm *FrameMonitor) FetchCommittedFrames() []*GlobalFrameWrapper {
+	// Collect addresses of nodes that succeeded.
+	fm.statusMutex.RLock()
+	var readyAddrs []string
+	for _, status := range fm.nodeStatuses {
+		if status.lastGlobalHeadFrame >= fm.stopFrame && status.err == nil {
+			readyAddrs = append(readyAddrs, status.address)
+		}
+	}
+	fm.statusMutex.RUnlock()
+
+	var (
+		mu     sync.Mutex
+		frames []*GlobalFrameWrapper
+		wg     sync.WaitGroup
+	)
+
+	for _, addr := range readyAddrs {
+		wg.Add(1)
+		go func(address string) {
+			defer wg.Done()
+			client := fm.clients[address]
+			for frameNum := uint64(1); frameNum <= fm.stopFrame; frameNum++ {
+				ctx, cancel := context.WithTimeout(fm.ctx, 5*time.Second)
+				resp, err := client.GetGlobalFrame(ctx, &protobufs.GetGlobalFrameRequest{FrameNumber: frameNum})
+				cancel()
+				if err != nil {
+					fm.logger.Warn("failed to fetch committed frame",
+						zap.String("address", address),
+						zap.Uint64("frame_number", frameNum),
+						zap.Error(err))
+					continue
+				}
+				wrapper := &GlobalFrameWrapper{GlobalFrame: resp.Frame}
+				if err != nil {
+					fm.logger.Warn("failed to get frame identity",
+						zap.String("address", address),
+						zap.Uint64("frame_number", frameNum),
+						zap.Error(err))
+					continue
+				}
+				mu.Lock()
+				frames = append(frames, wrapper)
+				mu.Unlock()
+			}
+		}(addr)
+	}
+
+	wg.Wait()
+	fm.logger.Info("fetched committed frames from nodes",
+		zap.Int("node_count", len(readyAddrs)),
+		zap.Int("frame_count", len(frames)))
+	return frames
+}

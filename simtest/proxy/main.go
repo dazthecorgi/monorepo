@@ -116,7 +116,7 @@ func main() {
 	if nodeAddressesStr == "" {
 		fmt.Fprintf(os.Stderr, "Error: NODE_ADDRESSES environment variable is required\n")
 		os.Exit(1)
-	}	
+	}
 
 	// Parse stopFrame
 	stopFrame, err := strconv.ParseUint(stopFrameStr, 10, 64)
@@ -241,6 +241,10 @@ func main() {
 					zap.Int("nodes_reached_stop_frame", nodesReachedStopFrame),
 					zap.Int("total_nodes", totalNodes))
 
+				// Fetch committed frames from nodes and merge with gossip frames
+				committedFrames := frameMonitor.FetchCommittedFrames()
+				globalFrames = append(globalFrames, committedFrames...)
+
 				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
 					frameNumber, shared.NotificationTypeTerminalFrame, globalFrames,
 					nodesReachedStopFrame, totalNodes)
@@ -265,6 +269,6 @@ func main() {
 
 	frameMonitor.Close()
 	blossomSub.Close()
-	
+
 	os.Exit(0)
 }

@@ -3,6 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+SHORT=false
+for arg in "$@"; do
+    if [[ "$arg" == "-short" ]]; then
+        SHORT=true
+    fi
+done
+
 run() {
     echo ""
     echo ">>> $*"
@@ -32,6 +39,7 @@ lint_and_test
 
 # ── integration run ──────────────────────────────────────────────────────────
 
-cd "$SCRIPT_DIR"
-
-run go run . -verbose -stopframe=2 -partition1=archive-1,archive-2,archive-3 -partition2=archive-4
+if [[ "$SHORT" == false ]]; then
+    cd "$SCRIPT_DIR"
+    run go run . -verbose -stopframe=2 -partition1=archive-1,archive-2,archive-3 -partition2=archive-4
+fi
