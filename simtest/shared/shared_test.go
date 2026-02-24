@@ -3,6 +3,8 @@ package shared
 import (
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -150,5 +152,89 @@ func TestAllFramePartitions_TwoNodes_StopFrame0(t *testing.T) {
 		if !reflect.DeepEqual(got[i], w) {
 			t.Errorf("schedule[%d]: got %v, want %v", i, got[i], w)
 		}
+	}
+}
+
+func TestAllFramePartitionsUnique_Count(t *testing.T) {
+	// Burnside's lemma for n=3, stopFrame=2:
+	// (64 + 8+8+8 + 1+1) / 6 = 15 unique schedules.
+	count := 0
+	for range AllFramePartitionsUnique([]string{"A", "B", "C"}, 2) {
+		count++
+	}
+	if count != 15 {
+		t.Errorf("expected 15 unique schedules, got %d", count)
+	}
+}
+
+func TestAllFramePartitionsUnique_SymmetricDedup(t *testing.T) {
+	// The two schedules:
+	//   s1: Frame0:[A,B]|[C], Frame1:[A]|[B,C]
+	//   s2: Frame0:[A,C]|[B], Frame1:[A]|[B,C]
+	// are symmetric (swap B and C), so at most one should appear.
+	scheduleKey := func(s []FramePartitionEntry) string {
+		var sb strings.Builder
+		for _, e := range s {
+			p1 := make([]string, len(e.Partition1))
+			copy(p1, e.Partition1)
+			p2 := make([]string, len(e.Partition2))
+			copy(p2, e.Partition2)
+			sort.Strings(p1)
+			sort.Strings(p2)
+			fmt.Fprintf(&sb, "%d:%v|%v;", e.Frame, p1, p2)
+		}
+		return sb.String()
+	}
+
+	s1key := scheduleKey([]FramePartitionEntry{
+		{Frame: 0, Partition1: []string{"A", "B"}, Partition2: []string{"C"}},
+		{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
+	})
+	s2key := scheduleKey([]FramePartitionEntry{
+		{Frame: 0, Partition1: []string{"A", "C"}, Partition2: []string{"B"}},
+		{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
+	})
+
+	foundS1, foundS2 := false, false
+	for schedule := range AllFramePartitionsUnique([]string{"A", "B", "C"}, 2) {
+		k := scheduleKey(schedule)
+		if k == s1key {
+			foundS1 = true
+		}
+		if k == s2key {
+			foundS2 = true
+		}
+	}
+	if foundS1 && foundS2 {
+		t.Error("both symmetric schedules appear; expected only one representative")
+	}
+	if !foundS1 && !foundS2 {
+		t.Error("neither symmetric schedule appears; expected exactly one representative")
+	}
+}
+
+func TestAllFramePartitionsUnique_TwoNodes_NoDedup(t *testing.T) {
+	// For 2 nodes, the only swap maps the single bipartition to itself,
+	// so deduplication does not reduce the count. Expect 4 schedules.
+	count := 0
+	for range AllFramePartitionsUnique([]string{"A", "B"}, 1) {
+		count++
+	}
+	if count != 4 {
+		t.Errorf("expected 4 schedules for 2 nodes / stopFrame=1, got %d", count)
+	}
+}
+
+func TestAllFramePartitionsUnique_EmptyNodes(t *testing.T) {
+	// No bipartitions possible; one empty schedule, deduplicated to one.
+	count := 0
+	for schedule := range AllFramePartitionsUnique(nil, 5) {
+		if len(schedule) != 0 {
+			t.Errorf("expected empty schedule, got %v", schedule)
+		}
+		count++
+	}
+	if count != 1 {
+		t.Errorf("expected 1 schedule for nil nodes, got %d", count)
 	}
 }
