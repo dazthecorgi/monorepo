@@ -3,8 +3,7 @@ package shared
 import (
 	"fmt"
 	"reflect"
-	"sort"
-	"strings"
+	"slices"
 	"testing"
 )
 
@@ -43,7 +42,7 @@ func TestAllFramePartitions_TwoNodes_StopFrame1(t *testing.T) {
 	}
 
 	var got [][]FramePartitionEntry
-	for schedule := range AllFramePartitions(nodes, 1) {
+	for schedule := range allFramePartitions(nodes, 1) {
 		got = append(got, schedule)
 	}
 
@@ -59,9 +58,9 @@ func TestAllFramePartitions_TwoNodes_StopFrame1(t *testing.T) {
 
 func TestAllFramePartitions_ThreeNodes_StopFrame2_Count(t *testing.T) {
 	count := 0
-	for p := range AllFramePartitions([]string{"A", "B", "C"}, 2) {
+	for p := range allFramePartitions([]string{"A", "B", "C"}, 2) {
 		if len(p) == 2 {
-		fmt.Printf("\n")
+			fmt.Printf("\n")
 		}
 		for _, entry := range p {
 			if len(p) == 2 {
@@ -110,7 +109,7 @@ func TestAllBipartitions_SingleNode(t *testing.T) {
 func TestAllFramePartitions_EmptyNodes(t *testing.T) {
 	// No bipartitions possible; only one schedule (always empty) should be yielded.
 	count := 0
-	for schedule := range AllFramePartitions(nil, 5) {
+	for schedule := range allFramePartitions(nil, 5) {
 		if len(schedule) != 0 {
 			t.Errorf("expected empty schedule, got %v", schedule)
 		}
@@ -124,7 +123,7 @@ func TestAllFramePartitions_EmptyNodes(t *testing.T) {
 func TestAllFramePartitions_SingleNode(t *testing.T) {
 	// Single node cannot form a bipartition; only one empty schedule.
 	count := 0
-	for schedule := range AllFramePartitions([]string{"A"}, 3) {
+	for schedule := range allFramePartitions([]string{"A"}, 3) {
 		if len(schedule) != 0 {
 			t.Errorf("expected empty schedule, got %v", schedule)
 		}
@@ -142,7 +141,7 @@ func TestAllFramePartitions_TwoNodes_StopFrame0(t *testing.T) {
 		{{Frame: 0, Partition1: []string{"A"}, Partition2: []string{"B"}}},
 	}
 	var got [][]FramePartitionEntry
-	for schedule := range AllFramePartitions([]string{"A", "B"}, 0) {
+	for schedule := range allFramePartitions([]string{"A", "B"}, 0) {
 		got = append(got, schedule)
 	}
 	if len(got) != len(want) {
@@ -155,11 +154,11 @@ func TestAllFramePartitions_TwoNodes_StopFrame0(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitionsUnique_Count(t *testing.T) {
+func TestAllFramePartitions_UniqueCount(t *testing.T) {
 	// Burnside's lemma for n=3, stopFrame=2:
 	// (64 + 8+8+8 + 1+1) / 6 = 15 unique schedules.
 	count := 0
-	for range AllFramePartitionsUnique([]string{"A", "B", "C"}, 2) {
+	for range AllFramePartitions([]string{"A", "B", "C"}, 2) {
 		count++
 	}
 	if count != 15 {
@@ -167,41 +166,27 @@ func TestAllFramePartitionsUnique_Count(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitionsUnique_SymmetricDedup(t *testing.T) {
+func TestAllFramePartitions_SymmetricDedup(t *testing.T) {
 	// The two schedules:
 	//   s1: Frame0:[A,B]|[C], Frame1:[A]|[B,C]
 	//   s2: Frame0:[A,C]|[B], Frame1:[A]|[B,C]
 	// are symmetric (swap B and C), so at most one should appear.
-	scheduleKey := func(s []FramePartitionEntry) string {
-		var sb strings.Builder
-		for _, e := range s {
-			p1 := make([]string, len(e.Partition1))
-			copy(p1, e.Partition1)
-			p2 := make([]string, len(e.Partition2))
-			copy(p2, e.Partition2)
-			sort.Strings(p1)
-			sort.Strings(p2)
-			fmt.Fprintf(&sb, "%d:%v|%v;", e.Frame, p1, p2)
-		}
-		return sb.String()
-	}
-
-	s1key := scheduleKey([]FramePartitionEntry{
+	s1 := normalizeSchedule([]FramePartitionEntry{
 		{Frame: 0, Partition1: []string{"A", "B"}, Partition2: []string{"C"}},
 		{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
 	})
-	s2key := scheduleKey([]FramePartitionEntry{
+	s2 := normalizeSchedule([]FramePartitionEntry{
 		{Frame: 0, Partition1: []string{"A", "C"}, Partition2: []string{"B"}},
 		{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
 	})
 
 	foundS1, foundS2 := false, false
-	for schedule := range AllFramePartitionsUnique([]string{"A", "B", "C"}, 2) {
-		k := scheduleKey(schedule)
-		if k == s1key {
+	for schedule := range AllFramePartitions([]string{"A", "B", "C"}, 2) {
+		ns := normalizeSchedule(schedule)
+		if reflect.DeepEqual(ns, s1) {
 			foundS1 = true
 		}
-		if k == s2key {
+		if reflect.DeepEqual(ns, s2) {
 			foundS2 = true
 		}
 	}
@@ -213,11 +198,11 @@ func TestAllFramePartitionsUnique_SymmetricDedup(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitionsUnique_TwoNodes_NoDedup(t *testing.T) {
+func TestAllFramePartitions_TwoNodes_NoDedup(t *testing.T) {
 	// For 2 nodes, the only swap maps the single bipartition to itself,
 	// so deduplication does not reduce the count. Expect 4 schedules.
 	count := 0
-	for range AllFramePartitionsUnique([]string{"A", "B"}, 1) {
+	for range AllFramePartitions([]string{"A", "B"}, 1) {
 		count++
 	}
 	if count != 4 {
@@ -225,10 +210,10 @@ func TestAllFramePartitionsUnique_TwoNodes_NoDedup(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitionsUnique_EmptyNodes(t *testing.T) {
+func TestAllFramePartitions_EmptyNodes_Unique(t *testing.T) {
 	// No bipartitions possible; one empty schedule, deduplicated to one.
 	count := 0
-	for schedule := range AllFramePartitionsUnique(nil, 5) {
+	for schedule := range AllFramePartitions(nil, 5) {
 		if len(schedule) != 0 {
 			t.Errorf("expected empty schedule, got %v", schedule)
 		}
@@ -237,4 +222,16 @@ func TestAllFramePartitionsUnique_EmptyNodes(t *testing.T) {
 	if count != 1 {
 		t.Errorf("expected 1 schedule for nil nodes, got %d", count)
 	}
+}
+
+func normalizeSchedule(s []FramePartitionEntry) []FramePartitionEntry {
+	out := make([]FramePartitionEntry, len(s))
+	for i, e := range s {
+		out[i] = FramePartitionEntry{
+			Frame:      e.Frame,
+			Partition1: slices.Sorted(slices.Values(e.Partition1)),
+			Partition2: slices.Sorted(slices.Values(e.Partition2)),
+		}
+	}
+	return out
 }

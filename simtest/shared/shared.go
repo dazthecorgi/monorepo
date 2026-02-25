@@ -67,11 +67,11 @@ func allBipartitions(nodes []string) [][2][]string {
 	return result
 }
 
-// AllFramePartitions returns a lazy iterator over every possible complete
+// allFramePartitions returns a lazy iterator over every possible complete
 // partition schedule for the given nodes across frames 0..stopFrame.
 // Each schedule is a slice of FramePartitionEntry (one per frame that has a
 // partition; frames with no partition are omitted).
-func AllFramePartitions(nodes []string, stopFrame uint64) iter.Seq[[]FramePartitionEntry] {
+func allFramePartitions(nodes []string, stopFrame uint64) iter.Seq[[]FramePartitionEntry] {
 	bipartitions := allBipartitions(nodes)
 	B := len(bipartitions)
 	numFrames := int(stopFrame) + 1
@@ -172,16 +172,16 @@ func canonicalForm(schedule []FramePartitionEntry, nodes []string) string {
 	return minForm
 }
 
-// AllFramePartitionsUnique returns a lazy iterator over one representative
+// AllFramePartitions returns a lazy iterator over one representative
 // schedule per symmetry class (equivalence under any permutation of node names).
-func AllFramePartitionsUnique(nodes []string, stopFrame uint64) iter.Seq[[]FramePartitionEntry] {
+func AllFramePartitions(nodes []string, stopFrame uint64) iter.Seq[[]FramePartitionEntry] {
 	sorted := make([]string, len(nodes))
 	copy(sorted, nodes)
 	sort.Strings(sorted)
 
 	return func(yield func([]FramePartitionEntry) bool) {
 		seen := make(map[string]struct{})
-		for schedule := range AllFramePartitions(sorted, stopFrame) {
+		for schedule := range allFramePartitions(sorted, stopFrame) {
 			cf := canonicalForm(schedule, sorted)
 			if _, ok := seen[cf]; ok {
 				continue
