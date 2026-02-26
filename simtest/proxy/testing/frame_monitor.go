@@ -63,7 +63,7 @@ func NewFrameMonitor(
 	}
 
 	for _, addr := range fm.nodeAddresses {
-		fm.logger.Info("creating gRPC client", zap.String("address", addr))
+		fm.logger.Debug("creating gRPC client", zap.String("address", addr))
 
 		// Create gRPC connection with insecure credentials (for local simulation)
 		conn, err := grpc.NewClient(
@@ -146,8 +146,9 @@ func (fm *FrameMonitor) pollNode(addr string) {
 	if err != nil {
 		status.err = err
 		status.consecutiveFailures++
-		fm.logger.Warn("failed to poll node",
+		fm.logger.Debug("failed to poll node for stop frame",
 			zap.String("address", addr),
+			zap.Uint64("stop_frame", fm.stopFrame),
 			zap.Int("consecutive_failures", status.consecutiveFailures),
 			zap.Error(err))
 		return
@@ -159,9 +160,8 @@ func (fm *FrameMonitor) pollNode(addr string) {
 	status.consecutiveFailures = 0
 	status.err = nil
 
-	fm.logger.Debug("polled node",
+	fm.logger.Debug("successfully polled node for stop frame",
 		zap.String("address", addr),
-		zap.Uint64("last_global_head_frame", resp.Frame.GetFrameNumber()),
 		zap.Uint64("stop_frame", fm.stopFrame))
 }
 
@@ -183,25 +183,17 @@ func (fm *FrameMonitor) pollAllNodes() {
 // checkAllNodesReachedStopFrame checks if enough nodes have reached the stop frame
 // Returns true if the condition is met and monitoring should stop
 func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
-	fm.statusMutex.RLock()
-	defer fm.statusMutex.RUnlock()
-
 	now := time.Now()
-	readyCount := 0
+	readyCount := fm.countNodesReachedStopFrame()
 	failedCount := 0
 	var notReadyNodes []string
 
-	for _, status := range fm.nodeStatuses {
-		// Check if node has reached stop frame
-		if status.lastGlobalHeadFrame >= fm.stopFrame && status.err == nil {
-			readyCount++
-			fm.logger.Info("node reached stop frame",
-				zap.String("address", status.address),
-				zap.Uint64("frame", status.lastGlobalHeadFrame))
-			continue
-		}
+	// Enough nodes already reached the stop frame
+	if readyCount >= fm.minNodes {
+		return true
+	}
 
-		// Check if node is within grace period
+	for _, status := range fm.nodeStatuses {
 		if status.err != nil {
 			timeSinceLastSuccess := now.Sub(status.lastSuccessfulPoll)
 
@@ -210,6 +202,7 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 				timeSinceLastSuccess = now.Sub(status.firstPolledAt)
 			}
 
+			// Check if node is within grace period
 			if timeSinceLastSuccess > fm.timeout {
 				fm.logger.Error("node exceeded timeout",
 					zap.String("address", status.address),
@@ -224,14 +217,9 @@ func (fm *FrameMonitor) checkAllNodesReachedStopFrame() bool {
 					zap.Duration("timeout", fm.timeout),
 					zap.Error(status.err))
 			}
+
+			notReadyNodes = append(notReadyNodes, status.address)
 		}
-
-		notReadyNodes = append(notReadyNodes, status.address)
-	}
-
-	// Enough nodes already reached the stop frame
-	if readyCount >= fm.minNodes {
-		return true
 	}
 
 	// Log summary

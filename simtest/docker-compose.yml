@@ -48,7 +48,8 @@ services:
       - STOP_FRAME=${STOP_FRAME}
       - RUNNER_AUTH=${RUNNER_AUTH}
       - NODE_ADDRESSES=${NODE_ADDRESSES}
-      - FRAME_PARTITIONS=${FRAME_PARTITIONS}
+      - MIN_NODES=${MIN_NODES}
+      - RANK_PARTITIONS=${RANK_PARTITIONS}
     networks:
       - proxy-network
       - archive-1-network

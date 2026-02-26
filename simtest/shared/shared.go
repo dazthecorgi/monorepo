@@ -14,27 +14,41 @@ const (
 	NotificationTypeTerminalFrame NotificationType = "terminal_frame_reached"
 )
 
-// FramePartitionEntry defines a partition configuration to apply when a specific
-// frame number is observed over gossip.
-type FramePartitionEntry struct {
-	Frame      uint64   `json:"frame"`
+// RankPartitionEntry defines a partition configuration to apply when a specific
+// rank number is observed over gossip.
+type RankPartitionEntry struct {
+	Rank       uint64   `json:"rank"`
 	Partition1 []string `json:"partition1"`
 	Partition2 []string `json:"partition2"`
 }
 
-// ParseFramePartitions parses a JSON-encoded list of FramePartitionEntry values
-// and returns a lookup map keyed by frame number. It rejects duplicate frame numbers.
-func ParseFramePartitions(raw string) (map[uint64]FramePartitionEntry, error) {
-	var entries []FramePartitionEntry
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+// ParseRankPartitions parses a JSON-encoded list of RankPartitionEntry values
+// and returns a lookup map keyed by rank number. It rejects duplicate rank numbers
+// and requires all fields (rank, partition1, partition2) to be present in each entry.
+func ParseRankPartitions(raw string) (map[uint64]RankPartitionEntry, error) {
+	var rawEntries []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &rawEntries); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
-	m := make(map[uint64]FramePartitionEntry, len(entries))
-	for _, e := range entries {
-		if _, dup := m[e.Frame]; dup {
-			return nil, fmt.Errorf("duplicate frame number %d", e.Frame)
+	m := make(map[uint64]RankPartitionEntry, len(rawEntries))
+	for i, rawEntry := range rawEntries {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rawEntry, &fields); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
 		}
-		m[e.Frame] = e
+		for _, required := range []string{"rank", "partition1", "partition2"} {
+			if _, ok := fields[required]; !ok {
+				return nil, fmt.Errorf("entry %d: missing required field %q", i, required)
+			}
+		}
+		var e RankPartitionEntry
+		if err := json.Unmarshal(rawEntry, &e); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		if _, dup := m[e.Rank]; dup {
+			return nil, fmt.Errorf("duplicate rank number %d", e.Rank)
+		}
+		m[e.Rank] = e
 	}
 	return m, nil
 }
@@ -67,24 +81,24 @@ func allBipartitions(nodes []string) [][2][]string {
 	return result
 }
 
-// allFramePartitions returns a lazy iterator over every possible complete
-// partition schedule for the given nodes across frames 0..stopFrame.
-// Each schedule is a slice of FramePartitionEntry (one per frame that has a
-// partition; frames with no partition are omitted).
-func allFramePartitions(nodes []string, stopFrame uint64) iter.Seq[[]FramePartitionEntry] {
+// allRankPartitions returns a lazy iterator over every possible complete
+// partition schedule for the given nodes across ranks 0..stopRank.
+// Each schedule is a slice of RankPartitionEntry (one per rank that has a
+// partition; ranks with no partition are omitted).
+func allRankPartitions(nodes []string, stopRank uint64) iter.Seq[[]RankPartitionEntry] {
 	bipartitions := allBipartitions(nodes)
 	B := len(bipartitions)
-	numFrames := int(stopFrame) + 1
+	numRanks := int(stopRank) + 1
 
-	return func(yield func([]FramePartitionEntry) bool) {
-		counter := make([]int, numFrames)
+	return func(yield func([]RankPartitionEntry) bool) {
+		counter := make([]int, numRanks)
 		for {
-			var schedule []FramePartitionEntry
+			var schedule []RankPartitionEntry
 			for i, digit := range counter {
 				if digit > 0 {
 					bp := bipartitions[digit-1]
-					schedule = append(schedule, FramePartitionEntry{
-						Frame:      uint64(i),
+					schedule = append(schedule, RankPartitionEntry{
+						Rank:       uint64(i),
 						Partition1: bp[0],
 						Partition2: bp[1],
 					})
@@ -126,7 +140,7 @@ func generatePermutations(nodes []string) [][]string {
 	return result
 }
 
-func canonicalForm(schedule []FramePartitionEntry, nodes []string) string {
+func canonicalForm(schedule []RankPartitionEntry, nodes []string) string {
 	perms := generatePermutations(nodes)
 	var minForm string
 	for k, perm := range perms {
@@ -149,7 +163,7 @@ func canonicalForm(schedule []FramePartitionEntry, nodes []string) string {
 			if p1[0] > p2[0] {
 				p1, p2 = p2, p1
 			}
-			fmt.Fprintf(&sb, "%d:", entry.Frame)
+			fmt.Fprintf(&sb, "%d:", entry.Rank)
 			for j, n := range p1 {
 				if j > 0 {
 					sb.WriteByte(',')
@@ -172,16 +186,16 @@ func canonicalForm(schedule []FramePartitionEntry, nodes []string) string {
 	return minForm
 }
 
-// AllFramePartitions returns a lazy iterator over one representative
+// AllRankPartitions returns a lazy iterator over one representative
 // schedule per symmetry class (equivalence under any permutation of node names).
-func AllFramePartitions(nodes []string, stopFrame uint64) iter.Seq[[]FramePartitionEntry] {
+func AllRankPartitions(nodes []string, stopRank uint64) iter.Seq[[]RankPartitionEntry] {
 	sorted := make([]string, len(nodes))
 	copy(sorted, nodes)
 	sort.Strings(sorted)
 
-	return func(yield func([]FramePartitionEntry) bool) {
+	return func(yield func([]RankPartitionEntry) bool) {
 		seen := make(map[string]struct{})
-		for schedule := range allFramePartitions(sorted, stopFrame) {
+		for schedule := range allRankPartitions(sorted, stopRank) {
 			cf := canonicalForm(schedule, sorted)
 			if _, ok := seen[cf]; ok {
 				continue

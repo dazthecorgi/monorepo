@@ -126,7 +126,7 @@ func main() {
 	}
 
 	ctx, cancel := context.WithCancelCause(context.Background())
-    defer cancel(nil)
+	defer cancel(nil)
 
 	// Set up logger
 	logConfig := zap.NewDevelopmentConfig()
@@ -141,8 +141,6 @@ func main() {
 	// Add run ID to logger context
 	logger = logger.With(zap.String("run_id", runID))
 
-	logger.Info("Stop frame", zap.Uint64("stop_frame", stopFrame))
-
 	nodeConfig, err := config.LoadConfig(*configDirectory, "", false)
 	if err != nil {
 		logger.Fatal("failed to load config", zap.Error(err))
@@ -156,36 +154,37 @@ func main() {
 	logger.Info("Starting DHT-only node...")
 
 	globalFrameChan := make(chan *protobufs.GlobalFrame, 100)
-	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan)
+	globalConsensusChan := make(chan uint64, 100)
+	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan, globalConsensusChan)
 
-	// Parse per-frame partition schedule from FRAME_PARTITIONS env var
-	var framePartitions map[uint64]shared.FramePartitionEntry
-	if fpStr := os.Getenv("FRAME_PARTITIONS"); fpStr != "" {
+	// Parse per-rank partition schedule from RANK_PARTITIONS env var
+	var rankPartitions map[uint64]shared.RankPartitionEntry
+	if rpStr := os.Getenv("RANK_PARTITIONS"); rpStr != "" {
 		var err error
-		framePartitions, err = shared.ParseFramePartitions(fpStr)
+		rankPartitions, err = shared.ParseRankPartitions(rpStr)
 		if err != nil {
-			logger.Fatal("failed to parse FRAME_PARTITIONS", zap.Error(err))
+			logger.Fatal("failed to parse RANK_PARTITIONS", zap.Error(err))
 		}
 		// Validate that all peer IDs are decodable
-		for _, e := range framePartitions {
+		for _, e := range rankPartitions {
 			for _, p := range e.Partition1 {
 				if _, err := peer.Decode(strings.TrimSpace(p)); err != nil {
-					logger.Fatal("invalid peer ID in FRAME_PARTITIONS partition1",
+					logger.Fatal("invalid peer ID in RANK_PARTITIONS partition1",
 						zap.String("peer_id", p), zap.Error(err))
 				}
 			}
 			for _, p := range e.Partition2 {
 				if _, err := peer.Decode(strings.TrimSpace(p)); err != nil {
-					logger.Fatal("invalid peer ID in FRAME_PARTITIONS partition2",
+					logger.Fatal("invalid peer ID in RANK_PARTITIONS partition2",
 						zap.String("peer_id", p), zap.Error(err))
 				}
 			}
 		}
-		logger.Info("loaded frame partition schedule",
-			zap.Int("entries", len(framePartitions)))
+		logger.Info("loaded rank partition schedule",
+			zap.Int("entries", len(rankPartitions)))
 
-		// Apply frame-0 entry immediately at startup
-		if entry, ok := framePartitions[0]; ok {
+		// Apply rank-0 entry immediately at startup
+		if entry, ok := rankPartitions[0]; ok {
 			blossomSub.ApplyPartition(entry.Partition1, entry.Partition2)
 		}
 	}
@@ -200,20 +199,22 @@ func main() {
 
 	// TODO move these to config
 	pollInterval := 5 * time.Second
-	timeout := 60 * time.Second
+	timeout := 300 * time.Second
 
 	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
 
 	minNodesStr := os.Getenv("MIN_NODES")
-	minNodes := len(nodeAddresses)
-	if minNodesStr != "" {
-		n, err := strconv.Atoi(minNodesStr)
-		if err != nil || n <= 0 {
-			fmt.Fprintf(os.Stderr, "Error: invalid MIN_NODES value '%s'\n", minNodesStr)
-			os.Exit(1)
-		}
-		minNodes = n
+	if minNodesStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: MIN_NODES environment variable is required\n")
+		os.Exit(1)
 	}
+	minNodes, err := strconv.Atoi(minNodesStr)
+	if err != nil || minNodes <= 0 {
+		fmt.Fprintf(os.Stderr, "Error: invalid MIN_NODES value '%s'\n", minNodesStr)
+		os.Exit(1)
+	}
+
+	logger.Info("Stop conditions", zap.Uint64("stop_frame", stopFrame), zap.Int("min_nodes", minNodes))
 
 	frameMonitor, err := testing.NewFrameMonitor(
 		ctx,
@@ -229,49 +230,81 @@ func main() {
 		logger.Fatal("failed to create frame monitor", zap.Error(err))
 	}
 
+	// applyRankPartition checks whether there is a partition entry for the given
+	// rank and applies it if the rank hasn't been seen before.
+	ranksApplied := make(map[uint64]struct{})
+	applyRankPartition := func(rank uint64) {
+		if rankPartitions == nil {
+			return
+		}
+		if _, seen := ranksApplied[rank]; seen {
+			return
+		}
+		ranksApplied[rank] = struct{}{}
+		if entry, ok := rankPartitions[rank]; ok {
+			logger.Info("applying rank partition",
+				zap.Uint64("rank", rank))
+			blossomSub.ApplyPartition(entry.Partition1, entry.Partition2)
+		} else {
+			logger.Info("no rank partition entry found for rank, clearing partitions",
+				zap.Uint64("rank", rank))
+			blossomSub.ClearPartitions()
+		}
+	}
+
 	go func() {
-		for frame := range globalFrameChan {
-			frameNumber := frame.Header.FrameNumber
-			globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
-			logger.Debug("received global frame",
-				zap.Uint64("frame_number", frame.Header.FrameNumber))
-
-			if framePartitions != nil {
-				if entry, ok := framePartitions[frameNumber]; ok {
-					blossomSub.ApplyPartition(entry.Partition1, entry.Partition2)
+		for {
+			select {
+			case frame, ok := <-globalFrameChan:
+				if !ok {
+					return
 				}
+				frameNumber := frame.Header.FrameNumber
+				rank := frame.Header.Rank
+				globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
+				logger.Debug("received global frame",
+					zap.Uint64("frame_number", frameNumber),
+					zap.Uint64("rank", rank))
+
+				applyRankPartition(rank)
+
+				if frameNumber == stopFrame {
+					logger.Info("received terminal frame over gossip network, monitoring all nodes now",
+						zap.Uint64("frame_number", frameNumber))
+
+					nodesReachedStopFrame, totalNodes := frameMonitor.StartMonitoring()
+					logger.Info("all nodes reached terminal frame",
+						zap.Int("nodes_reached_stop_frame", nodesReachedStopFrame),
+						zap.Int("total_nodes", totalNodes))
+
+					// Fetch committed frames from nodes and merge with gossip frames
+					committedFrames := frameMonitor.FetchCommittedFrames()
+					globalFrames = append(globalFrames, committedFrames...)
+
+					err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
+						frameNumber, shared.NotificationTypeTerminalFrame, globalFrames,
+						nodesReachedStopFrame, totalNodes)
+
+					cancel(err)
+					return
+				}
+			case rank, ok := <-globalConsensusChan:
+				if !ok {
+					return
+				}
+				applyRankPartition(rank)
 			}
-
-			if frameNumber == stopFrame {
-				logger.Info("received terminal frame over gossip network, monitoring all nodes now",
-					zap.Uint64("frame_number", frameNumber))
-
-				nodesReachedStopFrame, totalNodes := frameMonitor.StartMonitoring()
-				logger.Info("all nodes reached terminal frame",
-					zap.Int("nodes_reached_stop_frame", nodesReachedStopFrame),
-					zap.Int("total_nodes", totalNodes))
-
-				// Fetch committed frames from nodes and merge with gossip frames
-				committedFrames := frameMonitor.FetchCommittedFrames()
-				globalFrames = append(globalFrames, committedFrames...)
-
-				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
-					frameNumber, shared.NotificationTypeTerminalFrame, globalFrames,
-					nodesReachedStopFrame, totalNodes)
-
-				cancel(err)
-				return
-			}
-	}}()
+		}
+	}()
 
 	select {
-    case <-done:
-        logger.Info("Received interrupt signal")
-    case <-ctx.Done():
-        logger.Info("Regular shutdown initiated")
-    }
+	case <-done:
+		logger.Info("Received interrupt signal")
+	case <-ctx.Done():
+		logger.Info("Regular shutdown initiated")
+	}
 
-	if cause := context.Cause(ctx); cause != nil {
+	if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
 		logger.Error("Context cancelled with cause", zap.Error(cause))
 	}
 

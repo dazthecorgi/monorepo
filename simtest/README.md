@@ -15,6 +15,10 @@ go run .
 
 See `go run . -help` for more config options.
 
+## Development
+
+Run `./ci.sh` to test changes.
+
 ## Common Issues
 
 If you get the following error:

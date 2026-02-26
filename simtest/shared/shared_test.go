@@ -44,10 +44,10 @@ func TestAllBipartitions_ThreeNodesUnsorted(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitions_EmptyNodes(t *testing.T) {
+func TestAllRankPartitions_EmptyNodes(t *testing.T) {
 	// No bipartitions possible; only one schedule (always empty) should be yielded.
 	count := 0
-	for schedule := range AllFramePartitions(nil, 5) {
+	for schedule := range AllRankPartitions(nil, 5) {
 		if len(schedule) != 0 {
 			t.Errorf("expected empty schedule, got %v", schedule)
 		}
@@ -58,10 +58,10 @@ func TestAllFramePartitions_EmptyNodes(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitions_SingleNode(t *testing.T) {
+func TestAllRankPartitions_SingleNode(t *testing.T) {
 	// Single node cannot form a bipartition; only one empty schedule.
 	count := 0
-	for schedule := range AllFramePartitions([]string{"A"}, 3) {
+	for schedule := range AllRankPartitions([]string{"A"}, 3) {
 		if len(schedule) != 0 {
 			t.Errorf("expected empty schedule, got %v", schedule)
 		}
@@ -72,20 +72,20 @@ func TestAllFramePartitions_SingleNode(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitions_TwoNodes_StopFrame1(t *testing.T) {
+func TestAllRankPartitions_TwoNodes_StopRank1(t *testing.T) {
 	nodes := []string{"A", "B"}
-	want := [][]FramePartitionEntry{
+	want := [][]RankPartitionEntry{
 		nil,
-		{{Frame: 0, Partition1: []string{"A"}, Partition2: []string{"B"}}},
-		{{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B"}}},
+		{{Rank: 0, Partition1: []string{"A"}, Partition2: []string{"B"}}},
+		{{Rank: 1, Partition1: []string{"A"}, Partition2: []string{"B"}}},
 		{
-			{Frame: 0, Partition1: []string{"A"}, Partition2: []string{"B"}},
-			{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B"}},
+			{Rank: 0, Partition1: []string{"A"}, Partition2: []string{"B"}},
+			{Rank: 1, Partition1: []string{"A"}, Partition2: []string{"B"}},
 		},
 	}
 
-	var got [][]FramePartitionEntry
-	for schedule := range AllFramePartitions(nodes, 1) {
+	var got [][]RankPartitionEntry
+	for schedule := range AllRankPartitions(nodes, 1) {
 		got = append(got, schedule)
 	}
 
@@ -99,14 +99,14 @@ func TestAllFramePartitions_TwoNodes_StopFrame1(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitions_ThreeNodes_StopFrame2_Count(t *testing.T) {
+func TestAllRankPartitions_ThreeNodes_StopRank2_Count(t *testing.T) {
 	count := 0
-	for p := range AllFramePartitions([]string{"A", "B", "C"}, 2) {
+	for p := range AllRankPartitions([]string{"A", "B", "C"}, 2) {
 		fmt.Printf("\n")
 		for _, entry := range p {
-			fmt.Printf("  Frame=%d Partition1=%v Partition2=%v\n", entry.Frame, entry.Partition1, entry.Partition2)
-			if entry.Frame > 2 {
-				t.Errorf("got entry with frame %d, expected max frame 2", entry.Frame)
+			fmt.Printf("  Rank=%d Partition1=%v Partition2=%v\n", entry.Rank, entry.Partition1, entry.Partition2)
+			if entry.Rank > 2 {
+				t.Errorf("got entry with rank %d, expected max rank 2", entry.Rank)
 			}
 			if len(entry.Partition1)+len(entry.Partition2) != 3 {
 				t.Errorf("partitions do not cover all nodes: %v + %v", entry.Partition1, entry.Partition2)
@@ -129,14 +129,14 @@ func TestAllFramePartitions_ThreeNodes_StopFrame2_Count(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitions_TwoNodes_StopFrame0(t *testing.T) {
-	// stopFrame=0 means one frame; with 1 bipartition: (1+1)^1 = 2 schedules.
-	want := [][]FramePartitionEntry{
+func TestAllRankPartitions_TwoNodes_StopRank0(t *testing.T) {
+	// stopRank=0 means one rank; with 1 bipartition: (1+1)^1 = 2 schedules.
+	want := [][]RankPartitionEntry{
 		nil,
-		{{Frame: 0, Partition1: []string{"A"}, Partition2: []string{"B"}}},
+		{{Rank: 0, Partition1: []string{"A"}, Partition2: []string{"B"}}},
 	}
-	var got [][]FramePartitionEntry
-	for schedule := range AllFramePartitions([]string{"A", "B"}, 0) {
+	var got [][]RankPartitionEntry
+	for schedule := range AllRankPartitions([]string{"A", "B"}, 0) {
 		got = append(got, schedule)
 	}
 	if len(got) != len(want) {
@@ -149,22 +149,22 @@ func TestAllFramePartitions_TwoNodes_StopFrame0(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitions_SymmetricDedup(t *testing.T) {
+func TestAllRankPartitions_SymmetricDedup(t *testing.T) {
 	// The two schedules:
-	//   s1: Frame0:[A,B]|[C], Frame1:[A]|[B,C]
-	//   s2: Frame0:[A,C]|[B], Frame1:[A]|[B,C]
+	//   s1: Rank0:[A,B]|[C], Rank1:[A]|[B,C]
+	//   s2: Rank0:[A,C]|[B], Rank1:[A]|[B,C]
 	// are symmetric (swap B and C), so at most one should appear.
-	s1 := normalizeSchedule([]FramePartitionEntry{
-		{Frame: 0, Partition1: []string{"A", "B"}, Partition2: []string{"C"}},
-		{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
+	s1 := normalizeSchedule([]RankPartitionEntry{
+		{Rank: 0, Partition1: []string{"A", "B"}, Partition2: []string{"C"}},
+		{Rank: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
 	})
-	s2 := normalizeSchedule([]FramePartitionEntry{
-		{Frame: 0, Partition1: []string{"A", "C"}, Partition2: []string{"B"}},
-		{Frame: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
+	s2 := normalizeSchedule([]RankPartitionEntry{
+		{Rank: 0, Partition1: []string{"A", "C"}, Partition2: []string{"B"}},
+		{Rank: 1, Partition1: []string{"A"}, Partition2: []string{"B", "C"}},
 	})
 
 	foundS1, foundS2 := false, false
-	for schedule := range AllFramePartitions([]string{"A", "B", "C"}, 2) {
+	for schedule := range AllRankPartitions([]string{"A", "B", "C"}, 2) {
 		ns := normalizeSchedule(schedule)
 		if reflect.DeepEqual(ns, s1) {
 			foundS1 = true
@@ -181,23 +181,23 @@ func TestAllFramePartitions_SymmetricDedup(t *testing.T) {
 	}
 }
 
-func TestAllFramePartitions_SymmetricDedup_TwoPairSwap(t *testing.T) {
+func TestAllRankPartitions_SymmetricDedup_TwoPairSwap(t *testing.T) {
 	// With 4 nodes, the two schedules:
-	//   s1: Frame0:[A]|[B,C,D],   Frame1:[A,B]|[C,D]
-	//   s2: Frame0:[A,B,D]|[C],   Frame1:[A,B]|[C,D]
+	//   s1: Rank0:[A]|[B,C,D],   Rank1:[A,B]|[C,D]
+	//   s2: Rank0:[A,B,D]|[C],   Rank1:[A,B]|[C,D]
 	// are symmetric under the double transposition A↔C, B↔D,
 	// so at most one should appear.
-	s1 := normalizeSchedule([]FramePartitionEntry{
-		{Frame: 0, Partition1: []string{"A"}, Partition2: []string{"B", "C", "D"}},
-		{Frame: 1, Partition1: []string{"A", "B"}, Partition2: []string{"C", "D"}},
+	s1 := normalizeSchedule([]RankPartitionEntry{
+		{Rank: 0, Partition1: []string{"A"}, Partition2: []string{"B", "C", "D"}},
+		{Rank: 1, Partition1: []string{"A", "B"}, Partition2: []string{"C", "D"}},
 	})
-	s2 := normalizeSchedule([]FramePartitionEntry{
-		{Frame: 0, Partition1: []string{"A", "B", "D"}, Partition2: []string{"C"}},
-		{Frame: 1, Partition1: []string{"A", "B"}, Partition2: []string{"C", "D"}},
+	s2 := normalizeSchedule([]RankPartitionEntry{
+		{Rank: 0, Partition1: []string{"A", "B", "D"}, Partition2: []string{"C"}},
+		{Rank: 1, Partition1: []string{"A", "B"}, Partition2: []string{"C", "D"}},
 	})
 
 	foundS1, foundS2 := false, false
-	for schedule := range AllFramePartitions([]string{"A", "B", "C", "D"}, 1) {
+	for schedule := range AllRankPartitions([]string{"A", "B", "C", "D"}, 1) {
 		ns := normalizeSchedule(schedule)
 		if reflect.DeepEqual(ns, s1) {
 			foundS1 = true
@@ -214,11 +214,11 @@ func TestAllFramePartitions_SymmetricDedup_TwoPairSwap(t *testing.T) {
 	}
 }
 
-func normalizeSchedule(s []FramePartitionEntry) []FramePartitionEntry {
-	out := make([]FramePartitionEntry, len(s))
+func normalizeSchedule(s []RankPartitionEntry) []RankPartitionEntry {
+	out := make([]RankPartitionEntry, len(s))
 	for i, e := range s {
-		out[i] = FramePartitionEntry{
-			Frame:      e.Frame,
+		out[i] = RankPartitionEntry{
+			Rank:       e.Rank,
 			Partition1: slices.Sorted(slices.Values(e.Partition1)),
 			Partition2: slices.Sorted(slices.Values(e.Partition2)),
 		}

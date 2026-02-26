@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"math"
 	"math/big"
@@ -107,6 +108,7 @@ type BlossomSubProxy struct {
 	dht                 *dht.IpfsDHT
 	configDir           ConfigDir
 	globalFrameChan     chan<- *protobufs.GlobalFrame
+	globalConsensusChan chan<- uint64
 	partitioner         *networkPartitioner
 }
 
@@ -119,6 +121,7 @@ func NewBlossomSubProxy(
 	logger *zap.Logger,
 	configDir ConfigDir,
 	globalFrameChan chan<- *protobufs.GlobalFrame,
+	globalConsensusChan chan<- uint64,
 ) *BlossomSubProxy {
 
 	logger = logger.With(zap.String("process", "master"))
@@ -169,6 +172,7 @@ func NewBlossomSubProxy(
 		derivedPeerID:       derivedPeerId,
 		configDir:           configDir,
 		globalFrameChan:     globalFrameChan,
+		globalConsensusChan: globalConsensusChan,
 		partitioner:           partitioner,
 	}
 
@@ -809,6 +813,43 @@ func (b *BlossomSubProxy) Close() error {
 	return nil
 }
 
+// extractRankFromConsensusMessage peeks at the 4-byte type prefix and decodes
+// the consensus message to extract its rank number.
+func extractRankFromConsensusMessage(data []byte) (uint64, bool) {
+	if len(data) < 4 {
+		return 0, false
+	}
+	typePrefix := binary.BigEndian.Uint32(data[:4])
+	switch typePrefix {
+	case protobufs.GlobalProposalType:
+		proposal := &protobufs.GlobalProposal{}
+		if err := proposal.FromCanonicalBytes(data); err != nil {
+			return 0, false
+		}
+		if proposal.State != nil && proposal.State.Header != nil {
+			return proposal.State.Header.Rank, true
+		}
+		return 0, false
+	case protobufs.ProposalVoteType:
+		vote := &protobufs.ProposalVote{}
+		if err := vote.FromCanonicalBytes(data); err != nil {
+			return 0, false
+		}
+		return vote.Rank, true
+	case protobufs.TimeoutStateType:
+		timeout := &protobufs.TimeoutState{}
+		if err := timeout.FromCanonicalBytes(data); err != nil {
+			return 0, false
+		}
+		if timeout.Vote != nil {
+			return timeout.Vote.Rank, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
 func (b *BlossomSubProxy) SubscribeToAllMessages() error {
 	if err := b.subscribeToGlobalConsensus(); err != nil {
 		return errors.Wrap(err, "subscribe to global consensus")
@@ -836,7 +877,18 @@ func (b *BlossomSubProxy) subscribeToGlobalConsensus() error {
 			case <-b.ctx.Done():
 				return nil
 			default:
-				b.logger.Info("received global consensus message")
+				rank, ok := extractRankFromConsensusMessage(message.Data)
+				if ok {
+					b.logger.Info("received global consensus message",
+						zap.Uint64("rank", rank))
+					select {
+					case b.globalConsensusChan <- rank:
+					case <-b.ctx.Done():
+						return nil
+					}
+				} else {
+					b.logger.Info("received global consensus message")
+				}
 				return nil
 			}
 		},

@@ -61,10 +61,10 @@ var minNodes = flag.Int(
 	"minimum number of nodes that must reach the stop frame (0 = all nodes)",
 )
 
-var framePartitions = flag.String(
-	"frame-partitions",
+var rankPartitions = flag.String(
+	"rank-partitions",
 	"",
-	`JSON array of per-frame partition configs, e.g. '[{"frame":5,"partition1":["archive-1"],"partition2":["archive-3"]}]'`,
+	`JSON array of per-rank partition configs, e.g. '[{"rank":5,"partition1":["archive-1"],"partition2":["archive-3"]}]'`,
 )
 
 var logger *zap.SugaredLogger
@@ -197,6 +197,53 @@ func main() {
 		execDir = cwd
 	}
 
+	nodeAddresses, err := getArchiveServices(ctx, execDir)
+	if err != nil {
+		logger.Errorw("Failed to get archive services", "error", err)
+		os.Exit(RunnerErrorExitCode)
+	}
+
+	minimumNodes := len(nodeAddresses)
+	if *minNodes > 0 {
+		minimumNodes = *minNodes
+	}
+
+	rankPartitionsResolved := ""
+	if *rankPartitions != "" {
+		parsed, err := shared.ParseRankPartitions(*rankPartitions)
+		if err != nil {
+			logger.Errorw("failed to parse -rank-partitions", "error", err)
+			os.Exit(RunnerErrorExitCode)
+		}
+		// Resolve node names to peer IDs
+		resolved := make([]shared.RankPartitionEntry, 0, len(parsed))
+		for _, e := range parsed {
+			if len(e.Partition1) > 0 {
+				ids, err := resolveNodePeerIDs(execDir, e.Partition1)
+				if err != nil {
+					logger.Errorw("failed to resolve rank %d partition1", "rank", e.Rank, "error", err)
+			os.Exit(RunnerErrorExitCode)
+				}
+				e.Partition1 = ids
+			}
+			if len(e.Partition2) > 0 {
+				ids, err := resolveNodePeerIDs(execDir, e.Partition2)
+				if err != nil {
+					logger.Errorw("failed to resolve rank %d partition2", "rank", e.Rank, "error", err)
+					os.Exit(RunnerErrorExitCode)
+				}
+				e.Partition2 = ids
+			}
+			resolved = append(resolved, e)
+		}
+		serialized, err := json.Marshal(resolved)
+		if err != nil {
+			logger.Errorw("failed to serialize rank-partitions", "error", err)
+			os.Exit(RunnerErrorExitCode)
+		}
+		rankPartitionsResolved = string(serialized)
+	}
+
 	// Build images ONCE (shared by all test runs)
 	if err := dockerComposeBuild(ctx, execDir, *verbose); err != nil {
 		logger.Errorw("Failed to build docker compose", "error", err)
@@ -295,7 +342,7 @@ func main() {
 			logger.Debugw("Starting test run", "run_number", runNumber+1, "run_id", runID)
 
 			startTime := time.Now()
-			result := runSingleTest(ctx, runID, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry)
+			result := runSingleTest(ctx, runID, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry, *parallel, nodeAddresses, minimumNodes, rankPartitionsResolved)
 			result.Duration = time.Since(startTime)
 
 			resultsChan <- result
@@ -353,7 +400,7 @@ func main() {
 	os.Exit(0)
 }
 
-func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry) TestResult {
+func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, parallelRuns int, nodeAddresses []string, minimumNodes int, rankPartitionsResolved string) TestResult {
 	// Create notification channel for this run
 	notifChan := make(chan shared.FrameNotification, 10)
 	router.Register(runID, notifChan)
@@ -363,7 +410,7 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	projectName := fmt.Sprintf("simtest_run_%s", runID)
 
 	// Start compose stack
-	if err := executeTest(ctx, runID, execDir, bearerToken, projectName, stopFrame, verbose, *parallel); err != nil {
+	if err := executeTest(ctx, runID, execDir, bearerToken, projectName, stopFrame, verbose, parallelRuns, nodeAddresses, minimumNodes, rankPartitionsResolved); err != nil {
 		logger.Errorw("Failed to start compose stack", "error", err, "run_id", runID)
 		return TestResult{
 			RunID:        runID,
@@ -379,7 +426,7 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 
-		if err := dockerComposeDown(cleanupCtx, execDir, projectName, verbose, *parallel); err != nil {
+		if err := dockerComposeDown(cleanupCtx, execDir, projectName, verbose, parallelRuns); err != nil {
 			logger.Errorw("Failed to cleanup compose stack", "error", err, "run_id", runID, "project", projectName)
 		}
 
@@ -396,22 +443,35 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 			"nodes_reached_stop_frame", n.NodesReachedStopFrame,
 			"total_nodes", n.TotalNodes)
 		notification = &n
+		// Determine result based on notification
+		if notification.SafetyError != "" {
+			return TestResult{
+				RunID:        runID,
+				Success:      false,
+				ErrorMessage: notification.SafetyError,
+			}
+		}
+
+		if notification.NodesReachedStopFrame != minimumNodes {
+			return TestResult{
+				RunID:        runID,
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("expected %d nodes to reach stop frame, but got %d", minimumNodes, notification.NodesReachedStopFrame),
+			}
+		}
+
+		return TestResult{
+			RunID:   runID,
+			Success: true,
+		}
+
 	case <-ctx.Done():
 		logger.Debugw("Test run cancelled", "run_id", runID, "reason", ctx.Err())
-	}
-
-	// Determine result based on notification
-	if notification != nil && notification.SafetyError != "" {
 		return TestResult{
 			RunID:        runID,
 			Success:      false,
-			ErrorMessage: notification.SafetyError,
+			ErrorMessage: fmt.Sprintf("test run cancelled: %v", ctx.Err()),
 		}
-	}
-
-	return TestResult{
-		RunID:   runID,
-		Success: true,
 	}
 }
 
@@ -444,14 +504,14 @@ func resolveNodePeerIDs(execDir string, nodeNames []string) ([]string, error) {
 
 // getArchiveServices discovers archive services from docker-compose.yml
 // Returns a comma-separated list of node addresses (e.g., "archive-1:8337,archive-2:8337")
-func getArchiveServices(ctx context.Context, workDir string) (string, error) {
+func getArchiveServices(ctx context.Context, workDir string) ([]string, error) {
 	// Use docker compose config --services to list all services
 	cmd := exec.CommandContext(ctx, "docker", "compose", "config", "--services")
 	cmd.Dir = workDir
 
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to list docker compose services: %w", err)
+		return nil, fmt.Errorf("failed to list docker compose services: %w", err)
 	}
 
 	// Parse service names and filter for archive-* services
@@ -467,14 +527,14 @@ func getArchiveServices(ctx context.Context, workDir string) (string, error) {
 	}
 
 	if len(archiveAddresses) == 0 {
-		return "", fmt.Errorf("no archive node addresses found")
+		return nil, fmt.Errorf("no archive node addresses found")
 	}
 
-	return strings.Join(archiveAddresses, ","), nil
+	return archiveAddresses, nil
 }
 
 // executeTest executes "docker compose up" using CLI commands
-func executeTest(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, stopFrame int, verbose bool, parallel int) error {
+func executeTest(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, stopFrame int, verbose bool, parallelRuns int, nodeAddresses []string, minimumNodes int, resolvedRankPartitions string) error {
 	// Verify docker-compose.yml exists
 	composePath := filepath.Join(execDir, "docker-compose.yml")
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
@@ -482,55 +542,19 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 	}
 	logger.Debugw("Found docker-compose.yml", "path", composePath, "project", projectName)
 
-	// Discover archive services for multi-node synchronization
-	nodeAddresses, err := getArchiveServices(ctx, execDir)
-	if err != nil {
-		return err
-	}
-
 	// Prepare environment variables for docker-compose
 	env := map[string]string{
 		"RUN_ID":         runId,
 		"RUNNER_AUTH":    bearerToken,
 		"RUNNER_ADDRESS": "host.docker.internal:" + strings.TrimPrefix(*listenPort, ":"),
 		"STOP_FRAME":     fmt.Sprintf("%d", stopFrame),
-		"NODE_ADDRESSES": nodeAddresses,
-		"MIN_NODES":      fmt.Sprintf("%d", *minNodes),
-	}
-
-	if *framePartitions != "" {
-		parsed, err := shared.ParseFramePartitions(*framePartitions)
-		if err != nil {
-			return fmt.Errorf("failed to parse -frame-partitions: %w", err)
-		}
-		// Resolve node names to peer IDs
-		resolved := make([]shared.FramePartitionEntry, 0, len(parsed))
-		for _, e := range parsed {
-			if len(e.Partition1) > 0 {
-				ids, err := resolveNodePeerIDs(execDir, e.Partition1)
-				if err != nil {
-					return fmt.Errorf("failed to resolve frame %d partition1: %w", e.Frame, err)
-				}
-				e.Partition1 = ids
-			}
-			if len(e.Partition2) > 0 {
-				ids, err := resolveNodePeerIDs(execDir, e.Partition2)
-				if err != nil {
-					return fmt.Errorf("failed to resolve frame %d partition2: %w", e.Frame, err)
-				}
-				e.Partition2 = ids
-			}
-			resolved = append(resolved, e)
-		}
-		serialized, err := json.Marshal(resolved)
-		if err != nil {
-			return fmt.Errorf("failed to serialize frame-partitions: %w", err)
-		}
-		env["FRAME_PARTITIONS"] = string(serialized)
+		"NODE_ADDRESSES": strings.Join(nodeAddresses, ","),
+		"MIN_NODES":     fmt.Sprintf("%d", minimumNodes),
+		"RANK_PARTITIONS": resolvedRankPartitions,
 	}
 
 	// Start services with environment variables
-	if err := dockerComposeUp(ctx, execDir, projectName, env, verbose, parallel); err != nil {
+	if err := dockerComposeUp(ctx, execDir, projectName, env, verbose, parallelRuns); err != nil {
 		return fmt.Errorf("failed to start compose stack: %w", err)
 	}
 
@@ -645,7 +669,7 @@ func dockerComposeUp(ctx context.Context, workDir string, projectName string, en
 
 // dockerComposeDown executes "docker compose down" with cleanup flags.
 // It removes containers, networks, orphaned containers, and volumes.
-func dockerComposeDown(ctx context.Context, workDir string, projectName string, verbose bool, parallel int) error {
+func dockerComposeDown(ctx context.Context, workDir string, projectName string, verbose bool, parallelRuns int) error {
 	logger.Debugw("Executing docker compose down", "project", projectName)
 
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "down",
@@ -655,7 +679,7 @@ func dockerComposeDown(ctx context.Context, workDir string, projectName string, 
 	cmd.Dir = workDir
 
 	// Suppress output for parallel runs to avoid interleaving logs, but show for single runs if verbose is enabled
-	if verbose && parallel == 1 {
+	if verbose && parallelRuns == 1 {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {
