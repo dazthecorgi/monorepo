@@ -1145,24 +1145,27 @@ func (e *GlobalConsensusEngine) setupGRPCServer() error {
 		},
 	)
 
-	// TODO uncomment
-	// tlsCreds, err := e.authProvider.CreateServerTLSCredentials()
-	// if err != nil {
-	// 	return errors.Wrap(err, "setup gRPC server")
-	// }
-
-	// Create gRPC server with TLS
-	e.grpcServer = qgrpc.NewServer(
-		// TODO uncomment
-		// grpc.Creds(tlsCreds),
-		// grpc.ChainUnaryInterceptor(e.authProvider.UnaryInterceptor),
-		// grpc.ChainStreamInterceptor(e.authProvider.StreamInterceptor),
-		grpc.MaxRecvMsgSize(e.config.Engine.SyncMessageLimits.MaxRecvMsgSize),
-		grpc.MaxSendMsgSize(e.config.Engine.SyncMessageLimits.MaxSendMsgSize),
-	)
+	if !e.config.Engine.DisableGlobalServiceAuthentication {
+		tlsCreds, err := e.authProvider.CreateServerTLSCredentials()
+		if err != nil {
+			return errors.Wrap(err, "setup gRPC server")
+		}
+		e.grpcServer = qgrpc.NewServer(
+			grpc.Creds(tlsCreds),
+			grpc.ChainUnaryInterceptor(e.authProvider.UnaryInterceptor),
+			grpc.ChainStreamInterceptor(e.authProvider.StreamInterceptor),
+			grpc.MaxRecvMsgSize(e.config.Engine.SyncMessageLimits.MaxRecvMsgSize),
+			grpc.MaxSendMsgSize(e.config.Engine.SyncMessageLimits.MaxSendMsgSize),
+		)
+	} else {
+		e.grpcServer = qgrpc.NewServer(
+			grpc.MaxRecvMsgSize(e.config.Engine.SyncMessageLimits.MaxRecvMsgSize),
+			grpc.MaxSendMsgSize(e.config.Engine.SyncMessageLimits.MaxSendMsgSize),
+		)
+	}
 
 	// Create TCP listener
-	var err error // TODO remove when uncommenting TLS
+	var err error
 	e.grpcListener, err = net.Listen("tcp", listenAddr)
 	if err != nil {
 		return errors.Wrap(err, "setup gRPC server")

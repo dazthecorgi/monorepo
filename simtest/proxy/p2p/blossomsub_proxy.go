@@ -65,20 +65,59 @@ func newPartitionedPairKey(a, b peer.ID) partitionedPairKey {
 	return partitionedPairKey{Lo: b, Hi: a}
 }
 
-type networkPartitioner struct {
-	mu             sync.RWMutex
+// NetworkPartitioner tracks which peer pairs are partitioned from each other.
+// It is safe for concurrent use. Both BlossomSubProxy and GRPCProxy share one
+// instance so that a single ApplyPartition call affects all transports.
+type NetworkPartitioner struct {
+	mu               sync.RWMutex
 	partitionedPairs map[partitionedPairKey]struct{}
 }
 
-func newNetworkPartitioner() *networkPartitioner {
-	return &networkPartitioner{partitionedPairs: make(map[partitionedPairKey]struct{})}
+// NewNetworkPartitioner creates a new, empty NetworkPartitioner.
+func NewNetworkPartitioner() *NetworkPartitioner {
+	return &NetworkPartitioner{partitionedPairs: make(map[partitionedPairKey]struct{})}
 }
 
-func (ns *networkPartitioner) forwardFilter(from, to peer.ID) bool {
+// ForwardFilter returns true when forwarding between from and to is allowed.
+func (ns *NetworkPartitioner) ForwardFilter(from, to peer.ID) bool {
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
 	_, blocked := ns.partitionedPairs[newPartitionedPairKey(from, to)]
 	return !blocked
+}
+
+// PartitionPeers suppresses forwarding between peerA and peerB. Idempotent.
+func (ns *NetworkPartitioner) PartitionPeers(peerA, peerB peer.ID) {
+	ns.mu.Lock()
+	ns.partitionedPairs[newPartitionedPairKey(peerA, peerB)] = struct{}{}
+	ns.mu.Unlock()
+}
+
+// UnpartitionPeers removes a partition between peerA and peerB. Idempotent.
+func (ns *NetworkPartitioner) UnpartitionPeers(peerA, peerB peer.ID) {
+	ns.mu.Lock()
+	delete(ns.partitionedPairs, newPartitionedPairKey(peerA, peerB))
+	ns.mu.Unlock()
+}
+
+// ClearPartitions removes all active partitions.
+func (ns *NetworkPartitioner) ClearPartitions() {
+	ns.mu.Lock()
+	ns.partitionedPairs = make(map[partitionedPairKey]struct{})
+	ns.mu.Unlock()
+}
+
+// ApplyPartition clears existing partitions and blocks all group1 × group2 pairs.
+// Each element is a base58-encoded peer ID string.
+func (ns *NetworkPartitioner) ApplyPartition(group1, group2 []string) {
+	ns.ClearPartitions()
+	for _, p1 := range group1 {
+		for _, p2 := range group2 {
+			pid1, _ := peer.Decode(strings.TrimSpace(p1))
+			pid2, _ := peer.Decode(strings.TrimSpace(p2))
+			ns.PartitionPeers(pid1, pid2)
+		}
+	}
 }
 
 type appScore struct {
@@ -109,7 +148,7 @@ type BlossomSubProxy struct {
 	configDir           ConfigDir
 	globalFrameChan     chan<- *protobufs.GlobalFrame
 	globalConsensusChan chan<- uint64
-	partitioner         *networkPartitioner
+	partitioner         *NetworkPartitioner
 }
 
 var ErrNoPeersAvailable = errors.New("no peers available")
@@ -122,12 +161,11 @@ func NewBlossomSubProxy(
 	configDir ConfigDir,
 	globalFrameChan chan<- *protobufs.GlobalFrame,
 	globalConsensusChan chan<- uint64,
+	partitioner *NetworkPartitioner,
 ) *BlossomSubProxy {
 
 	logger = logger.With(zap.String("process", "master"))
 	listenAddr := p2pConfig.ListenMultiaddr
-
-	partitioner := newNetworkPartitioner()
 
 	opts := []libp2pconfig.Option{
 		libp2p.ListenAddrStrings(listenAddr),
@@ -209,7 +247,7 @@ func NewBlossomSubProxy(
 
 	blossomOpts := []blossomsub.Option{
 		blossomsub.WithStrictSignatureVerification(true),
-		blossomsub.WithForwardFilter(partitioner.forwardFilter),
+		blossomsub.WithForwardFilter(partitioner.ForwardFilter),
 	}
 
 	if tracer != nil {
@@ -751,9 +789,7 @@ func toBlossomSubParams(
 // The operation is idempotent. peerA and peerB are raw peer.ID bytes.
 func (b *BlossomSubProxy) PartitionPeers(peerA, peerB []byte) {
 	pidA, pidB := peer.ID(peerA), peer.ID(peerB)
-	b.partitioner.mu.Lock()
-	b.partitioner.partitionedPairs[newPartitionedPairKey(pidA, pidB)] = struct{}{}
-	b.partitioner.mu.Unlock()
+	b.partitioner.PartitionPeers(pidA, pidB)
 	b.logger.Info("partitioned peers",
 		zap.String("peer_a", pidA.String()),
 		zap.String("peer_b", pidB.String()),
@@ -764,9 +800,7 @@ func (b *BlossomSubProxy) PartitionPeers(peerA, peerB []byte) {
 // allowing their messages to flow through the proxy again. Idempotent.
 func (b *BlossomSubProxy) UnpartitionPeers(peerA, peerB []byte) {
 	pidA, pidB := peer.ID(peerA), peer.ID(peerB)
-	b.partitioner.mu.Lock()
-	delete(b.partitioner.partitionedPairs, newPartitionedPairKey(pidA, pidB))
-	b.partitioner.mu.Unlock()
+	b.partitioner.UnpartitionPeers(pidA, pidB)
 	b.logger.Info("unpartitioned peers",
 		zap.String("peer_a", pidA.String()),
 		zap.String("peer_b", pidB.String()),
@@ -775,9 +809,7 @@ func (b *BlossomSubProxy) UnpartitionPeers(peerA, peerB []byte) {
 
 // ClearPartitions removes all network partitions, allowing all peers to communicate freely.
 func (b *BlossomSubProxy) ClearPartitions() {
-	b.partitioner.mu.Lock()
-	b.partitioner.partitionedPairs = make(map[partitionedPairKey]struct{})
-	b.partitioner.mu.Unlock()
+	b.partitioner.ClearPartitions()
 	b.logger.Info("cleared all network partitions")
 }
 
@@ -785,14 +817,11 @@ func (b *BlossomSubProxy) ClearPartitions() {
 // partitions, then blocks forwarding between every pair in group1 x group2.
 // Each element is a base58-encoded peer ID string.
 func (b *BlossomSubProxy) ApplyPartition(group1, group2 []string) {
-	b.ClearPartitions()
-	for _, p1 := range group1 {
-		for _, p2 := range group2 {
-			pid1, _ := peer.Decode(strings.TrimSpace(p1))
-			pid2, _ := peer.Decode(strings.TrimSpace(p2))
-			b.PartitionPeers([]byte(pid1), []byte(pid2))
-		}
-	}
+	b.partitioner.ApplyPartition(group1, group2)
+	b.logger.Info("applied partition",
+		zap.Int("group1_size", len(group1)),
+		zap.Int("group2_size", len(group2)),
+	)
 }
 
 // Close implements p2p.PubSub.

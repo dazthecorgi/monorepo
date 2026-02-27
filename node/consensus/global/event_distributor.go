@@ -19,6 +19,7 @@ import (
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/lifecycle"
 	"source.quilibrium.com/quilibrium/monorepo/node/consensus/provers"
@@ -979,20 +980,6 @@ func (e *GlobalConsensusEngine) collectAllocationSnapshot(
 	var client protobufs.GlobalServiceClient = nil
 	if len(info.Reachability[0].StreamMultiaddrs) > 0 {
 		s := info.Reachability[0].StreamMultiaddrs[0]
-		creds, err := p2p.NewPeerAuthenticator(
-			e.logger,
-			e.config.P2P,
-			nil,
-			nil,
-			nil,
-			nil,
-			[][]byte{[]byte(peerId)},
-			map[string]channel.AllowedPeerPolicyType{},
-			map[string]channel.AllowedPeerPolicyType{},
-		).CreateClientTLSCredentials([]byte(peerId))
-		if err != nil {
-			return nil, false
-		}
 
 		ma, err := multiaddr.StringCast(s)
 		if err != nil {
@@ -1004,9 +991,30 @@ func (e *GlobalConsensusEngine) collectAllocationSnapshot(
 			return nil, false
 		}
 
+		var dialOpt grpc.DialOption
+		if e.config.Engine.DisableGlobalServiceAuthentication {
+			dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
+		} else {
+			creds, err := p2p.NewPeerAuthenticator(
+				e.logger,
+				e.config.P2P,
+				nil,
+				nil,
+				nil,
+				nil,
+				[][]byte{[]byte(peerId)},
+				map[string]channel.AllowedPeerPolicyType{},
+				map[string]channel.AllowedPeerPolicyType{},
+			).CreateClientTLSCredentials([]byte(peerId))
+			if err != nil {
+				return nil, false
+			}
+			dialOpt = grpc.WithTransportCredentials(creds)
+		}
+
 		cc, err := grpc.NewClient(
 			mga.String(),
-			grpc.WithTransportCredentials(creds),
+			dialOpt,
 		)
 		if err != nil {
 			e.logger.Debug(

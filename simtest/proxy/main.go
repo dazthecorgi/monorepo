@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +21,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
+	proxygrpc "source.quilibrium.com/quilibrium/monorepo/simtest/proxy/grpc"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/testing"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
@@ -155,7 +157,9 @@ func main() {
 
 	globalFrameChan := make(chan *protobufs.GlobalFrame, 100)
 	globalConsensusChan := make(chan uint64, 100)
-	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan, globalConsensusChan)
+
+	partitioner := p2p.NewNetworkPartitioner()
+	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan, globalConsensusChan, partitioner)
 
 	// Parse per-rank partition schedule from RANK_PARTITIONS env var
 	var rankPartitions map[uint64]shared.RankPartitionEntry
@@ -193,15 +197,72 @@ func main() {
 		logger.Fatal("failed to subscribe to all messages", zap.Error(err))
 	}
 
+	// Start gRPC proxy if GRPC_BACKEND_PEER_IDS is provided.
+	// GRPC_BACKEND_PEER_IDS must be a comma-separated list of base58 peer IDs in
+	// the same order as NODE_ADDRESSES. GRPC_PROXY_BASE_PORT sets the first proxy
+	// port (default 9000); archive-N gets port basePort+N.
+	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
+	var grpcProxy *proxygrpc.GRPCProxy
+	if peerIDsStr := os.Getenv("GRPC_BACKEND_PEER_IDS"); peerIDsStr != "" {
+		grpcBasePort := 9000
+		if portStr := os.Getenv("GRPC_PROXY_BASE_PORT"); portStr != "" {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				grpcBasePort = p
+			}
+		}
+
+		peerIDStrs := strings.Split(strings.TrimSpace(peerIDsStr), ",")
+		if len(peerIDStrs) != len(nodeAddresses) {
+			logger.Fatal("GRPC_BACKEND_PEER_IDS count does not match NODE_ADDRESSES count",
+				zap.Int("peer_ids", len(peerIDStrs)),
+				zap.Int("node_addresses", len(nodeAddresses)))
+		}
+
+		backends := make([]proxygrpc.BackendEntry, 0, len(nodeAddresses))
+		ipToPeerID := make(map[string]peer.ID)
+
+		for i, addr := range nodeAddresses {
+			addr = strings.TrimSpace(addr)
+			pidStr := strings.TrimSpace(peerIDStrs[i])
+			pid, err := peer.Decode(pidStr)
+			if err != nil {
+				logger.Fatal("invalid peer ID in GRPC_BACKEND_PEER_IDS",
+					zap.String("peer_id", pidStr), zap.Error(err))
+			}
+
+			// Resolve the backend hostname to populate the IP→peerID map.
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr // addr may already be just a hostname
+			}
+			ips, err := net.LookupHost(host)
+			if err != nil {
+				logger.Warn("could not resolve backend host for IP→peerID map",
+					zap.String("host", host), zap.Error(err))
+			}
+			for _, ip := range ips {
+				ipToPeerID[ip] = pid
+			}
+
+			backends = append(backends, proxygrpc.BackendEntry{
+				ListenPort:  grpcBasePort + i + 1,
+				BackendAddr: addr,
+				PeerID:      pid,
+			})
+		}
+
+		grpcProxy = proxygrpc.NewGRPCProxy(logger, partitioner, backends, ipToPeerID)
+		if err := grpcProxy.Serve(); err != nil {
+			logger.Fatal("failed to start gRPC proxy", zap.Error(err))
+		}
+		logger.Info("gRPC proxy started",
+			zap.Int("backends", len(backends)),
+			zap.Int("base_port", grpcBasePort))
+	}
+
 	logger.Info("DHT node running. Press Ctrl+C to stop.")
 
 	globalFrames := make([]*testing.GlobalFrameWrapper, 0, stopFrame)
-
-	// TODO move these to config
-	pollInterval := 5 * time.Second
-	timeout := 30 * time.Second
-
-	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
 
 	minNodesStr := os.Getenv("MIN_NODES")
 	if minNodesStr == "" {
@@ -213,6 +274,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: invalid MIN_NODES value '%s'\n", minNodesStr)
 		os.Exit(1)
 	}
+
+	// TODO move these to config
+	pollInterval := 5 * time.Second
+	timeout := 30 * time.Second
 
 	logger.Info("Stop conditions", zap.Uint64("stop_frame", stopFrame), zap.Int("min_nodes", minNodes))
 
@@ -312,6 +377,9 @@ func main() {
 
 	frameMonitor.Close()
 	blossomSub.Close()
+	if grpcProxy != nil {
+		grpcProxy.Close()
+	}
 
 	os.Exit(0)
 }
