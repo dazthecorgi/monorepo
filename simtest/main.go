@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"go.uber.org/zap"
@@ -57,6 +58,12 @@ var rankPartitions = flag.String(
 	`JSON array of per-rank partition configs, e.g. '[{"rank":5,"partition1":["archive-1"],"partition2":["archive-3"]}]'`,
 )
 
+var outDir = flag.String(
+	"out",
+	"./out",
+	"directory to save artifacts (config, result, logs) for failing test runs",
+)
+
 var logger *zap.SugaredLogger
 
 const (
@@ -87,41 +94,55 @@ func generateBearerToken() (string, error) {
 }
 
 // resolveRankPartitions parses the raw JSON rank-partitions flag and resolves
-// node names to peer IDs. Returns an empty string if rawJSON is empty.
-func resolveRankPartitions(execDir, rawJSON string) (string, error) {
+// node names to peer IDs. Returns the original entries (with service names) and
+// the peer-ID-resolved JSON string for the docker env var. Both are empty/nil if rawJSON is empty.
+func resolveRankPartitions(execDir, rawJSON string) (original []shared.RankPartitionEntry, resolved string, err error) {
 	if rawJSON == "" {
-		return "", nil
+		return nil, "", nil
 	}
 
 	parsed, err := shared.ParseRankPartitions(rawJSON)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse -rank-partitions: %w", err)
+		return nil, "", fmt.Errorf("failed to parse -rank-partitions: %w", err)
 	}
 
-	resolved := make([]shared.RankPartitionEntry, 0, len(parsed))
-	for _, e := range parsed {
+	// Sort by rank for deterministic order in artifacts.
+	ranks := make([]uint64, 0, len(parsed))
+	for r := range parsed {
+		ranks = append(ranks, r)
+	}
+	sort.Slice(ranks, func(i, j int) bool { return ranks[i] < ranks[j] })
+
+	original = make([]shared.RankPartitionEntry, 0, len(parsed))
+	for _, r := range ranks {
+		original = append(original, parsed[r])
+	}
+
+	resolvedEntries := make([]shared.RankPartitionEntry, 0, len(parsed))
+	for _, e := range original {
+		re := e
 		if len(e.Partition1) > 0 {
 			ids, err := resolveNodePeerIDs(execDir, e.Partition1)
 			if err != nil {
-				return "", fmt.Errorf("failed to resolve rank %d partition1: %w", e.Rank, err)
+				return nil, "", fmt.Errorf("failed to resolve rank %d partition1: %w", e.Rank, err)
 			}
-			e.Partition1 = ids
+			re.Partition1 = ids
 		}
 		if len(e.Partition2) > 0 {
 			ids, err := resolveNodePeerIDs(execDir, e.Partition2)
 			if err != nil {
-				return "", fmt.Errorf("failed to resolve rank %d partition2: %w", e.Rank, err)
+				return nil, "", fmt.Errorf("failed to resolve rank %d partition2: %w", e.Rank, err)
 			}
-			e.Partition2 = ids
+			re.Partition2 = ids
 		}
-		resolved = append(resolved, e)
+		resolvedEntries = append(resolvedEntries, re)
 	}
 
-	serialized, err := json.Marshal(resolved)
+	serialized, err := json.Marshal(resolvedEntries)
 	if err != nil {
-		return "", fmt.Errorf("failed to serialize rank-partitions: %w", err)
+		return nil, "", fmt.Errorf("failed to serialize rank-partitions: %w", err)
 	}
-	return string(serialized), nil
+	return original, string(serialized), nil
 }
 
 // cleanupActiveProjects tears down any Docker Compose projects still registered
@@ -176,7 +197,7 @@ func main() {
 		minimumNodes = *minNodes
 	}
 
-	rankPartitionsResolved, err := resolveRankPartitions(execDir, *rankPartitions)
+	rankPartitionsOriginal, rankPartitionsResolved, err := resolveRankPartitions(execDir, *rankPartitions)
 	if err != nil {
 		logger.Errorw("Failed to resolve rank partitions", "error", err)
 		os.Exit(RunnerErrorExitCode)
@@ -199,7 +220,7 @@ func main() {
 	server := startNotificationServer(*listenPort, bearerToken, router)
 	projectRegistry := NewProjectRegistry()
 
-	results, interrupted := runAllTests(ctx, cancel, *parallel, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry, nodeAddresses, minimumNodes, rankPartitionsResolved)
+	results, interrupted := runAllTests(ctx, cancel, *parallel, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry, nodeAddresses, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, *outDir)
 
 	// Shutdown HTTP server gracefully
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)

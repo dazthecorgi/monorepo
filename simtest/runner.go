@@ -14,6 +14,7 @@ import (
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
+
 type TestResult struct {
 	RunID        string
 	Success      bool
@@ -23,7 +24,7 @@ type TestResult struct {
 
 // runAllTests handles signal setup, spawns parallel test runs, and collects results.
 // Returns all results and whether execution was interrupted by a signal.
-func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, nodeAddresses []string, minimumNodes int, rankPartitionsResolved string) (results []TestResult, interrupted bool) {
+func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, nodeAddresses []string, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string) (results []TestResult, interrupted bool) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -44,7 +45,7 @@ func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, e
 			logger.Debugw("Starting test run", "run_number", runNumber+1, "run_id", runID)
 
 			startTime := time.Now()
-			result := runSingleTest(ctx, runID, execDir, bearerToken, router, verbose, stopFrame, projectRegistry, parallel, nodeAddresses, minimumNodes, rankPartitionsResolved)
+			result := runSingleTest(ctx, runID, execDir, bearerToken, router, verbose, stopFrame, projectRegistry, parallel, nodeAddresses, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, outDir)
 			result.Duration = time.Since(startTime)
 
 			resultsChan <- result
@@ -63,7 +64,7 @@ func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, e
 	return results, ctx.Err() != nil
 }
 
-func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, parallelRuns int, nodeAddresses []string, minimumNodes int, rankPartitionsResolved string) TestResult {
+func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, parallelRuns int, nodeAddresses []string, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string) TestResult {
 	// Create notification channel for this run
 	notifChan := make(chan shared.FrameNotification, 10)
 	router.Register(runID, notifChan)
@@ -97,6 +98,7 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	}()
 
 	// Wait for notification or context cancellation
+	var result TestResult
 	select {
 	case n := <-notifChan:
 		logger.Debugw("Terminal frame reached",
@@ -106,34 +108,46 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 			"total_nodes", n.TotalNodes)
 
 		if n.SafetyError != "" {
-			return TestResult{
+			result = TestResult{
 				RunID:        runID,
 				Success:      false,
 				ErrorMessage: n.SafetyError,
 			}
-		}
-
-		if n.NodesReachedStopFrame != minimumNodes {
-			return TestResult{
+		} else if n.NodesReachedStopFrame != minimumNodes {
+			result = TestResult{
 				RunID:        runID,
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("expected %d nodes to reach stop frame, but got %d", minimumNodes, n.NodesReachedStopFrame),
 			}
-		}
-
-		return TestResult{
-			RunID:   runID,
-			Success: true,
+		} else {
+			result = TestResult{
+				RunID:   runID,
+				Success: true,
+			}
 		}
 
 	case <-ctx.Done():
 		logger.Debugw("Test run cancelled", "run_id", runID, "reason", ctx.Err())
-		return TestResult{
+		result = TestResult{
 			RunID:        runID,
 			Success:      false,
 			ErrorMessage: fmt.Sprintf("test run cancelled: %v", ctx.Err()),
 		}
 	}
+
+	// Save artifacts for failing tests before compose stack is torn down
+	if !result.Success && outDir != "" {
+		cfg := testConfig{
+			RunID:          runID,
+			StopFrame:      stopFrame,
+			NodeAddresses:  nodeAddresses,
+			MinimumNodes:   minimumNodes,
+			RankPartitions: rankPartitionsOriginal,
+		}
+		saveFailureArtifacts(outDir, runID, projectName, execDir, result, cfg)
+	}
+
+	return result
 }
 
 func printSummary(results []TestResult, interrupted bool) {

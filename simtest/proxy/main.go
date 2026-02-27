@@ -199,7 +199,7 @@ func main() {
 
 	// TODO move these to config
 	pollInterval := 5 * time.Second
-	timeout := 300 * time.Second
+	timeout := 30 * time.Second
 
 	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
 

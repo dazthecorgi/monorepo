@@ -1,3 +1,4 @@
-logs.txt
+*logs.txt
 simtest
 .env
+out

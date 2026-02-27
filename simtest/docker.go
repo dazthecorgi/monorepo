@@ -145,6 +145,34 @@ func dockerComposeUp(ctx context.Context, workDir string, projectName string, en
 	return nil
 }
 
+// dockerComposeProjectServices lists all service names for a running Docker Compose project.
+func dockerComposeProjectServices(ctx context.Context, workDir string, projectName string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "ps", "--services")
+	cmd.Dir = workDir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker compose ps --services failed: %w", err)
+	}
+	var services []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			services = append(services, s)
+		}
+	}
+	return services, nil
+}
+
+// dockerComposeServiceLogs captures logs for a specific service in a Docker Compose project.
+func dockerComposeServiceLogs(ctx context.Context, workDir string, projectName string, service string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", projectName, "logs", "--no-color", service)
+	cmd.Dir = workDir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker compose logs for %s failed: %w", service, err)
+	}
+	return output, nil
+}
+
 // dockerComposeDown executes "docker compose down" with cleanup flags.
 // It removes containers, networks, orphaned containers, and volumes.
 func dockerComposeDown(ctx context.Context, workDir string, projectName string, verbose bool, parallelRuns int) error {

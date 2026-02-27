@@ -41,6 +41,6 @@ lint_and_test
 
 if [[ "$SHORT" == false ]]; then
     cd "$SCRIPT_DIR"
-    # run go run . -verbose -stopframe=2 -rank-partitions='[{"rank":0,"partition1":["archive-1","archive-2","archive-3"],"partition2":["archive-4"]}]'
+    #run go run . -verbose -stopframe=2 -rank-partitions='[{"rank":0,"partition1":["archive-1","archive-2","archive-3"],"partition2":["archive-4"]}]'
     run go run . -verbose -stopframe=2 
 fi
