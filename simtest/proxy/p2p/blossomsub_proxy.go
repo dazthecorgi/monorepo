@@ -611,7 +611,7 @@ func initDHT(
 	logger.Info("establishing dht")
 	var mode dht.ModeOpt
 	if isBootstrapPeer || network != 0 {
-		logger.Warn("BOOTSTRAP PEER")
+		logger.Info("BOOTSTRAP PEER")
 		mode = dht.ModeServer
 	} else {
 		mode = dht.ModeClient

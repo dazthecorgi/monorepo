@@ -52,7 +52,7 @@ p2p:
   highWatermarkConnections: 0
   directPeers: []
   grpcServerRateLimit: 0
-  minBootstrapPeers: 0
+  minBootstrapPeers: 1
   bootstrapParallelism: 0
   discoveryParallelism: 0
   discoveryPeerLookupLimit: 0
@@ -96,6 +96,7 @@ engine:
   allowExcessiveGOMAXPROCS: false
   blacklist: []
   alertKey: ""
+  disableGlobalServiceAuthentication: true
   difficulty: 0
   rebuildstart: ""
   rebuildend: ""
