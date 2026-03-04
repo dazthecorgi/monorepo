@@ -20,6 +20,7 @@ type TestResult struct {
 	Success      bool
 	ErrorMessage string
 	Duration     time.Duration
+	ArtifactDir  string
 }
 
 // runAllTests handles signal setup, spawns parallel test runs, and collects results.
@@ -144,7 +145,7 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 			MinimumNodes:   minimumNodes,
 			RankPartitions: rankPartitionsOriginal,
 		}
-		saveFailureArtifacts(outDir, runID, projectName, execDir, result, cfg)
+		result.ArtifactDir = saveFailureArtifacts(outDir, runID, projectName, execDir, result, cfg)
 	}
 
 	return result
@@ -188,6 +189,11 @@ func printSummary(results []TestResult, interrupted bool) {
 					"error", r.ErrorMessage,
 					"duration", r.Duration,
 				)
+			}
+		}
+		for _, r := range results {
+			if r.ArtifactDir != "" {
+				logger.Infow("Saved failure artifacts", "dir", r.ArtifactDir, "run_id", r.RunID)
 			}
 		}
 	}

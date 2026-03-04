@@ -27,11 +27,12 @@ type testResultOutput struct {
 
 // saveFailureArtifacts writes test config, result, and per-service logs to <outDir>/<runID>/.
 // It must be called before docker compose down so that service logs are still available.
-func saveFailureArtifacts(outDir, runID, projectName, execDir string, result TestResult, cfg testConfig) {
+// Returns the artifact directory path on success, or empty string on failure.
+func saveFailureArtifacts(outDir, runID, projectName, execDir string, result TestResult, cfg testConfig) string {
 	runDir := filepath.Join(outDir, runID)
 	if err := os.MkdirAll(runDir, 0755); err != nil {
 		logger.Errorw("Failed to create artifact directory", "error", err, "dir", runDir)
-		return
+		return ""
 	}
 
 	if data, err := yaml.Marshal(cfg); err != nil {
@@ -53,7 +54,7 @@ func saveFailureArtifacts(outDir, runID, projectName, execDir string, result Tes
 
 	saveServiceLogs(runDir, runID, projectName, execDir)
 
-	logger.Infow("Saved failure artifacts", "dir", runDir, "run_id", runID)
+	return runDir
 }
 
 // saveServiceLogs captures logs for each service and writes them to separate files under logs/.
