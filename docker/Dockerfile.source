@@ -243,7 +243,9 @@ COPY --from=gen-bulletproofs /opt/ceremonyclient/target/release/libbulletproofs.
 # Stage: build-p2p-ping
 # -----------------------------------------------------------------------------
 FROM common-context AS build-p2p-ping
-COPY ./node /opt/ceremonyclient/node
+COPY ./go-libp2p /opt/ceremonyclient/go-libp2p
+COPY ./go-multiaddr /opt/ceremonyclient/go-multiaddr
+COPY ./go-multiaddr-dns /opt/ceremonyclient/go-multiaddr-dns
 WORKDIR /opt/ceremonyclient/go-libp2p/examples/p2p-ping
 RUN go build -o /usr/bin/p2p-ping .
 
