@@ -161,3 +161,23 @@ func (mr *MockGlobalServiceClientMockRecorder) GetWorkerInfo(ctx, in any, opts .
 	varargs := append([]any{ctx, in}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetWorkerInfo", reflect.TypeOf((*MockGlobalServiceClient)(nil).GetWorkerInfo), varargs...)
 }
+
+// StreamGlobalMessages mocks base method.
+func (m *MockGlobalServiceClient) StreamGlobalMessages(ctx context.Context, in *protobufs.StreamGlobalMessagesRequest, opts ...grpc.CallOption) (protobufs.GlobalService_StreamGlobalMessagesClient, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, in}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "StreamGlobalMessages", varargs...)
+	ret0, _ := ret[0].(protobufs.GlobalService_StreamGlobalMessagesClient)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// StreamGlobalMessages indicates an expected call of StreamGlobalMessages.
+func (mr *MockGlobalServiceClientMockRecorder) StreamGlobalMessages(ctx, in any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, in}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StreamGlobalMessages", reflect.TypeOf((*MockGlobalServiceClient)(nil).StreamGlobalMessages), varargs...)
+}
