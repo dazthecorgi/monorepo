@@ -277,7 +277,7 @@ func main() {
 
 	// TODO move these to config
 	pollInterval := 5 * time.Second
-	timeout := 30 * time.Second
+	timeout := 2 * time.Minute
 
 	logger.Info("Stop conditions", zap.Uint64("stop_frame", stopFrame), zap.Int("min_nodes", minNodes))
 
