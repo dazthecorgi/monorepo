@@ -2998,7 +2998,7 @@ func (e *GlobalConsensusEngine) reportPeerInfoPeriodically(
 	ctx lifecycle.SignalerContext,
 ) {
 	e.logger.Info("starting periodic peer info reporting")
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -4438,7 +4438,8 @@ func (e *GlobalConsensusEngine) OnQuorumCertificateTriggeredRankChange(
 	}
 
 	if !bytes.Equal(frame.Header.ParentSelector, parentQC.Selector) {
-		e.logger.Error(
+		// If we get a new QC, but haven't synced yet, it's expected that that the last QC we have doesn't match the frame parent.
+		e.logger.Debug(
 			"quorum certificate does not match frame parent",
 			zap.String(
 				"frame_parent_selector",
