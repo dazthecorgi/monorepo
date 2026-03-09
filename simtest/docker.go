@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"gopkg.in/yaml.v3"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
@@ -61,9 +65,16 @@ func getArchiveServices(ctx context.Context, workDir string) ([]shared.NodeInfo,
 	return nodes, nil
 }
 
-// resolveNodePeerIDs reads the peer ID for each named node from its config.yml comment
-// and returns a map from node name to peer ID.
-// Each config.yml starts with a line of the form: "# Peer id: QmXXX..."
+// nodeConfigYAML is a minimal struct for unmarshalling the fields we need from config.yml.
+type nodeConfigYAML struct {
+	P2P struct {
+		PeerPrivKey           string `yaml:"peerPrivKey"`
+		StreamListenMultiaddr string `yaml:"streamListenMultiaddr"`
+	} `yaml:"p2p"`
+}
+
+// resolveNodePeerIDs derives the peer ID for each named node from the
+// p2p.peerPrivKey field in its config.yml and returns a map from node name to peer ID.
 func resolveNodePeerIDs(execDir string, nodeNames []string) (map[string]string, error) {
 	result := make(map[string]string, len(nodeNames))
 	for _, name := range nodeNames {
@@ -73,23 +84,31 @@ func resolveNodePeerIDs(execDir string, nodeNames []string) (map[string]string, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to read config for node %s: %w", name, err)
 		}
-		// First line format: "# Peer id: QmXXX..."
-		firstLine := strings.SplitN(string(data), "\n", 2)[0]
-		firstLine = strings.TrimSpace(firstLine)
-		const prefix = "# Peer id: "
-		if !strings.HasPrefix(firstLine, prefix) {
-			return nil, fmt.Errorf("config for node %s does not contain peer ID on first line (expected '# Peer id: ...')", name)
+		var cfg nodeConfigYAML
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse config for node %s: %w", name, err)
 		}
-		peerID := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
-		if peerID == "" {
-			return nil, fmt.Errorf("empty peer ID in config for node %s", name)
+		if cfg.P2P.PeerPrivKey == "" {
+			return nil, fmt.Errorf("p2p.peerPrivKey not found in config for node %s", name)
 		}
-		result[name] = peerID
+		rawKey, err := hex.DecodeString(cfg.P2P.PeerPrivKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to hex-decode peerPrivKey for node %s: %w", name, err)
+		}
+		privKey, err := libp2pcrypto.UnmarshalEd448PrivateKey(rawKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal peerPrivKey for node %s: %w", name, err)
+		}
+		pid, err := peer.IDFromPublicKey(privKey.GetPublic())
+		if err != nil {
+			return nil, fmt.Errorf("failed to derive peer ID for node %s: %w", name, err)
+		}
+		result[name] = pid.String()
 	}
 	return result, nil
 }
 
-// resolveNodeStreamPort reads the TCP port from streamListenMultiaddr in a node's config.yml.
+// resolveNodeStreamPort reads the TCP port from p2p.streamListenMultiaddr in a node's config.yml.
 // The expected format is e.g. "/ip4/0.0.0.0/tcp/8340/".
 func resolveNodeStreamPort(execDir, name string) (int, error) {
 	configFile := filepath.Join(execDir, "config", name+"-config", "config.yml")
@@ -97,26 +116,26 @@ func resolveNodeStreamPort(execDir, name string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to read config for node %s: %w", name, err)
 	}
-	const key = "streamListenMultiaddr:"
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, key) {
-			continue
-		}
-		ma := strings.TrimSpace(strings.TrimPrefix(trimmed, key))
-		parts := strings.Split(ma, "/")
-		for i, p := range parts {
-			if p == "tcp" && i+1 < len(parts) {
-				port, err := strconv.Atoi(parts[i+1])
-				if err != nil {
-					return 0, fmt.Errorf("invalid TCP port in streamListenMultiaddr for node %s: %w", name, err)
-				}
-				return port, nil
-			}
-		}
-		return 0, fmt.Errorf("no TCP component in streamListenMultiaddr for node %s: %q", name, ma)
+	var cfg nodeConfigYAML
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return 0, fmt.Errorf("failed to parse config for node %s: %w", name, err)
 	}
-	return 0, fmt.Errorf("streamListenMultiaddr not found in config for node %s", name)
+	ma := cfg.P2P.StreamListenMultiaddr
+	if ma == "" {
+		return 0, fmt.Errorf("p2p.streamListenMultiaddr not found in config for node %s", name)
+	}
+	// Format: /ip4/0.0.0.0/tcp/8340/
+	parts := strings.Split(ma, "/")
+	for i, p := range parts {
+		if p == "tcp" && i+1 < len(parts) {
+			port, err := strconv.Atoi(parts[i+1])
+			if err != nil {
+				return 0, fmt.Errorf("invalid TCP port in streamListenMultiaddr for node %s: %w", name, err)
+			}
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no TCP component in streamListenMultiaddr for node %s: %q", name, ma)
 }
 
 // executeTest executes "docker compose up" using CLI commands.
