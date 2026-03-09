@@ -184,7 +184,7 @@ func printSummary(results []TestResult, interrupted bool) {
 		logger.Info("Failed test runs:")
 		for _, r := range results {
 			if !r.Success {
-				logger.Errorw("  Run failed",
+				logger.Infow("  Run failed",
 					"run_id", r.RunID,
 					"error", r.ErrorMessage,
 					"duration", r.Duration,
