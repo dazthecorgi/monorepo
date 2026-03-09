@@ -209,19 +209,18 @@ func main() {
 	}
 
 	var grpcProxy *proxygrpc.GRPCProxy
-	var nodesWithPeerID []shared.NodeInfo
 	for _, n := range nodeInfos {
-		if n.PeerID != "" {
-			nodesWithPeerID = append(nodesWithPeerID, n)
+		if n.PeerID == "" {
+			logger.Fatal("node info missing peer ID", zap.String("name", n.Name))
 		}
 	}
-	if len(nodesWithPeerID) > 0 {
+	if len(nodeInfos) > 0 {
 		const grpcBasePort = 9000
 
-		backends := make([]proxygrpc.BackendEntry, 0, len(nodesWithPeerID))
+		backends := make([]proxygrpc.BackendEntry, 0, len(nodeInfos))
 		ipToPeerID := make(map[string]peer.ID)
 
-		for i, n := range nodesWithPeerID {
+		for i, n := range nodeInfos {
 			addr := n.StreamAddress()
 			pid, err := peer.Decode(n.PeerID)
 			if err != nil {
