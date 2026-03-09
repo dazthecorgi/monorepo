@@ -14,7 +14,7 @@ import (
 type testConfig struct {
 	RunID          string                      `yaml:"run_id"`
 	StopFrame      int                         `yaml:"stop_frame"`
-	NodeAddresses  []string                    `yaml:"node_addresses"`
+	Nodes          []shared.NodeInfo           `yaml:"nodes"`
 	MinimumNodes   int                         `yaml:"minimum_nodes"`
 	RankPartitions []shared.RankPartitionEntry `yaml:"rank_partitions,omitempty"`
 }

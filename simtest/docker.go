@@ -2,17 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
 // getArchiveServices discovers archive services from docker-compose.yml
-// and returns a list of node addresses (e.g., "archive-1:8340").
-func getArchiveServices(ctx context.Context, workDir string) ([]string, error) {
+// and returns a list of NodeInfo for each archive node.
+func getArchiveServices(ctx context.Context, workDir string) ([]shared.NodeInfo, error) {
 	cmd := exec.CommandContext(ctx, "docker", "compose", "config", "--services")
 	cmd.Dir = workDir
 
@@ -22,27 +26,46 @@ func getArchiveServices(ctx context.Context, workDir string) ([]string, error) {
 	}
 
 	services := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var archiveAddresses []string
+	var serviceNames []string
 
 	for _, service := range services {
 		service = strings.TrimSpace(service)
 		if strings.HasPrefix(service, "archive-") {
-			// Archive nodes expose global consensus gRPC on port 8340
-			archiveAddresses = append(archiveAddresses, fmt.Sprintf("%s:8340", service))
+			serviceNames = append(serviceNames, service)
 		}
 	}
 
-	if len(archiveAddresses) == 0 {
+	if len(serviceNames) == 0 {
 		return nil, fmt.Errorf("no archive node addresses found")
 	}
 
-	return archiveAddresses, nil
+	peerIDs, err := resolveNodePeerIDs(workDir, serviceNames)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve peer IDs: %w", err)
+	}
+
+	nodes := make([]shared.NodeInfo, len(serviceNames))
+	for i, name := range serviceNames {
+		port, err := resolveNodeStreamPort(workDir, name)
+		if err != nil {
+			return nil, err
+		}
+		nodes[i] = shared.NodeInfo{
+			Name:       name,
+			Hostname:   name,
+			StreamPort: port,
+			PeerID:     peerIDs[name],
+		}
+	}
+
+	return nodes, nil
 }
 
-// resolveNodePeerIDs reads the peer ID for each named node from its config.yml comment.
+// resolveNodePeerIDs reads the peer ID for each named node from its config.yml comment
+// and returns a map from node name to peer ID.
 // Each config.yml starts with a line of the form: "# Peer id: QmXXX..."
-func resolveNodePeerIDs(execDir string, nodeNames []string) ([]string, error) {
-	var peerIDs []string
+func resolveNodePeerIDs(execDir string, nodeNames []string) (map[string]string, error) {
+	result := make(map[string]string, len(nodeNames))
 	for _, name := range nodeNames {
 		name = strings.TrimSpace(name)
 		configFile := filepath.Join(execDir, "config", name+"-config", "config.yml")
@@ -61,13 +84,43 @@ func resolveNodePeerIDs(execDir string, nodeNames []string) ([]string, error) {
 		if peerID == "" {
 			return nil, fmt.Errorf("empty peer ID in config for node %s", name)
 		}
-		peerIDs = append(peerIDs, peerID)
+		result[name] = peerID
 	}
-	return peerIDs, nil
+	return result, nil
+}
+
+// resolveNodeStreamPort reads the TCP port from streamListenMultiaddr in a node's config.yml.
+// The expected format is e.g. "/ip4/0.0.0.0/tcp/8340/".
+func resolveNodeStreamPort(execDir, name string) (int, error) {
+	configFile := filepath.Join(execDir, "config", name+"-config", "config.yml")
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read config for node %s: %w", name, err)
+	}
+	const key = "streamListenMultiaddr:"
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, key) {
+			continue
+		}
+		ma := strings.TrimSpace(strings.TrimPrefix(trimmed, key))
+		parts := strings.Split(ma, "/")
+		for i, p := range parts {
+			if p == "tcp" && i+1 < len(parts) {
+				port, err := strconv.Atoi(parts[i+1])
+				if err != nil {
+					return 0, fmt.Errorf("invalid TCP port in streamListenMultiaddr for node %s: %w", name, err)
+				}
+				return port, nil
+			}
+		}
+		return 0, fmt.Errorf("no TCP component in streamListenMultiaddr for node %s: %q", name, ma)
+	}
+	return 0, fmt.Errorf("streamListenMultiaddr not found in config for node %s", name)
 }
 
 // executeTest executes "docker compose up" using CLI commands.
-func executeTest(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, stopFrame int, verbose bool, parallelRuns int, nodeAddresses []string, minimumNodes int, resolvedRankPartitions string) error {
+func executeTest(ctx context.Context, runId string, execDir string, bearerToken string, projectName string, stopFrame int, verbose bool, parallelRuns int, nodes []shared.NodeInfo, minimumNodes int, resolvedRankPartitions string) error {
 	// Verify docker-compose.yml exists
 	composePath := filepath.Join(execDir, "docker-compose.yml")
 	if _, err := os.Stat(composePath); os.IsNotExist(err) {
@@ -75,12 +128,17 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 	}
 	logger.Debugw("Found docker-compose.yml", "path", composePath, "project", projectName)
 
+	nodeInfosJSON, err := json.Marshal(nodes)
+	if err != nil {
+		return fmt.Errorf("failed to serialize node infos: %w", err)
+	}
+
 	env := map[string]string{
 		"RUN_ID":          runId,
 		"RUNNER_AUTH":     bearerToken,
 		"RUNNER_ADDRESS":  "host.docker.internal:" + strings.TrimPrefix(*listenPort, ":"),
 		"STOP_FRAME":      fmt.Sprintf("%d", stopFrame),
-		"NODE_ADDRESSES":  strings.Join(nodeAddresses, ","),
+		"NODE_INFOS":      string(nodeInfosJSON),
 		"MIN_NODES":       fmt.Sprintf("%d", minimumNodes),
 		"RANK_PARTITIONS": resolvedRankPartitions,
 	}

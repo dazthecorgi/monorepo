@@ -208,6 +208,16 @@ func AllRankPartitions(nodes []string, stopRank uint64) iter.Seq[[]RankPartition
 	}
 }
 
+// NodeInfo holds per-node address and identity information.
+type NodeInfo struct {
+	Name       string `json:"name"`        // service name, e.g. "archive-1"
+	Hostname   string `json:"hostname"`    // hostname, e.g. "archive-1"
+	StreamPort int    `json:"stream_port"` // TCP stream port, e.g. 8340
+	PeerID     string `json:"peer_id"`     // base58-encoded peer ID, empty if unknown
+}
+
+func (n NodeInfo) StreamAddress() string { return fmt.Sprintf("%s:%d", n.Hostname, n.StreamPort) }
+
 type FrameNotification struct {
 	RunID                 string           `json:"run_id,omitempty"`
 	FrameNumber           uint64           `json:"frame_number"`

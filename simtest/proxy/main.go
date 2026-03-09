@@ -96,7 +96,7 @@ func main() {
 	runnerAddress := os.Getenv("RUNNER_ADDRESS")
 	stopFrameStr := os.Getenv("STOP_FRAME")
 	runnerAuthToken := os.Getenv("RUNNER_AUTH")
-	nodeAddressesStr := os.Getenv("NODE_ADDRESSES")
+	nodeInfosStr := os.Getenv("NODE_INFOS")
 
 	// Validate required environment variables
 	if runID == "" {
@@ -115,8 +115,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: STOP_FRAME environment variable is required\n")
 		os.Exit(1)
 	}
-	if nodeAddressesStr == "" {
-		fmt.Fprintf(os.Stderr, "Error: NODE_ADDRESSES environment variable is required\n")
+	if nodeInfosStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: NODE_INFOS environment variable is required\n")
 		os.Exit(1)
 	}
 
@@ -197,48 +197,43 @@ func main() {
 		logger.Fatal("failed to subscribe to all messages", zap.Error(err))
 	}
 
-	// Start gRPC proxy if GRPC_BACKEND_PEER_IDS is provided.
-	// GRPC_BACKEND_PEER_IDS must be a comma-separated list of base58 peer IDs in
-	// the same order as NODE_ADDRESSES. GRPC_PROXY_BASE_PORT sets the first proxy
-	// port (default 9000); archive-N gets port basePort+N.
-	nodeAddresses := strings.Split(strings.TrimSpace(nodeAddressesStr), ",")
+	// Parse NODE_INFOS JSON
+	var nodeInfos []shared.NodeInfo
+	if err := json.Unmarshal([]byte(nodeInfosStr), &nodeInfos); err != nil {
+		logger.Fatal("failed to parse NODE_INFOS", zap.Error(err))
+	}
+
+	nodeAddresses := make([]string, len(nodeInfos))
+	for i, n := range nodeInfos {
+		nodeAddresses[i] = n.StreamAddress()
+	}
+
 	var grpcProxy *proxygrpc.GRPCProxy
-	if peerIDsStr := os.Getenv("GRPC_BACKEND_PEER_IDS"); peerIDsStr != "" {
-		grpcBasePort := 9000
-		if portStr := os.Getenv("GRPC_PROXY_BASE_PORT"); portStr != "" {
-			if p, err := strconv.Atoi(portStr); err == nil {
-				grpcBasePort = p
-			}
+	var nodesWithPeerID []shared.NodeInfo
+	for _, n := range nodeInfos {
+		if n.PeerID != "" {
+			nodesWithPeerID = append(nodesWithPeerID, n)
 		}
+	}
+	if len(nodesWithPeerID) > 0 {
+		const grpcBasePort = 9000
 
-		peerIDStrs := strings.Split(strings.TrimSpace(peerIDsStr), ",")
-		if len(peerIDStrs) != len(nodeAddresses) {
-			logger.Fatal("GRPC_BACKEND_PEER_IDS count does not match NODE_ADDRESSES count",
-				zap.Int("peer_ids", len(peerIDStrs)),
-				zap.Int("node_addresses", len(nodeAddresses)))
-		}
-
-		backends := make([]proxygrpc.BackendEntry, 0, len(nodeAddresses))
+		backends := make([]proxygrpc.BackendEntry, 0, len(nodesWithPeerID))
 		ipToPeerID := make(map[string]peer.ID)
 
-		for i, addr := range nodeAddresses {
-			addr = strings.TrimSpace(addr)
-			pidStr := strings.TrimSpace(peerIDStrs[i])
-			pid, err := peer.Decode(pidStr)
+		for i, n := range nodesWithPeerID {
+			addr := n.StreamAddress()
+			pid, err := peer.Decode(n.PeerID)
 			if err != nil {
-				logger.Fatal("invalid peer ID in GRPC_BACKEND_PEER_IDS",
-					zap.String("peer_id", pidStr), zap.Error(err))
+				logger.Fatal("invalid peer ID in NODE_INFOS",
+					zap.String("name", n.Name), zap.String("peer_id", n.PeerID), zap.Error(err))
 			}
 
 			// Resolve the backend hostname to populate the IP→peerID map.
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				host = addr // addr may already be just a hostname
-			}
-			ips, err := net.LookupHost(host)
+			ips, err := net.LookupHost(n.Hostname)
 			if err != nil {
 				logger.Warn("could not resolve backend host for IP→peerID map",
-					zap.String("host", host), zap.Error(err))
+					zap.String("host", n.Hostname), zap.Error(err))
 			}
 			for _, ip := range ips {
 				ipToPeerID[ip] = pid

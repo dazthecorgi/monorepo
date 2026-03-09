@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -122,18 +123,24 @@ func resolveRankPartitions(execDir, rawJSON string) (original []shared.RankParti
 	for _, e := range original {
 		re := e
 		if len(e.Partition1) > 0 {
-			ids, err := resolveNodePeerIDs(execDir, e.Partition1)
+			idMap, err := resolveNodePeerIDs(execDir, e.Partition1)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to resolve rank %d partition1: %w", e.Rank, err)
 			}
-			re.Partition1 = ids
+			re.Partition1 = make([]string, len(e.Partition1))
+			for j, n := range e.Partition1 {
+				re.Partition1[j] = idMap[strings.TrimSpace(n)]
+			}
 		}
 		if len(e.Partition2) > 0 {
-			ids, err := resolveNodePeerIDs(execDir, e.Partition2)
+			idMap, err := resolveNodePeerIDs(execDir, e.Partition2)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to resolve rank %d partition2: %w", e.Rank, err)
 			}
-			re.Partition2 = ids
+			re.Partition2 = make([]string, len(e.Partition2))
+			for j, n := range e.Partition2 {
+				re.Partition2[j] = idMap[strings.TrimSpace(n)]
+			}
 		}
 		resolvedEntries = append(resolvedEntries, re)
 	}
