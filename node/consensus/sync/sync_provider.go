@@ -16,6 +16,7 @@ import (
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/consensus"
 	"source.quilibrium.com/quilibrium/monorepo/consensus/models"
@@ -134,7 +135,11 @@ func (p *SyncProvider[StateT, ProposalT]) Start(
 				request.peerId,
 				request.identity,
 			)
-		case <-time.After(10 * time.Minute):
+		case <-time.After(10 * time.Second):
+			p.logger.Debug(
+				"periodic sync timer fired",
+				zap.Uint64("current_frame", (*p.forks.FinalizedState().State).GetFrameNumber()),
+			)
 			peerId, err := p.getRandomProverPeerId()
 			if err != nil {
 				p.logger.Debug("could not get random prover peer id", zap.Error(err))
@@ -638,21 +643,6 @@ func (p *SyncProvider[StateT, ProposalT]) getDirectChannel(
 	*grpc.ClientConn,
 	error,
 ) {
-	creds, err := p2p.NewPeerAuthenticator(
-		p.logger,
-		p.config.P2P,
-		nil,
-		nil,
-		nil,
-		nil,
-		[][]byte{peerId},
-		map[string]channel.AllowedPeerPolicyType{},
-		map[string]channel.AllowedPeerPolicyType{},
-	).CreateClientTLSCredentials(peerId)
-	if err != nil {
-		return nil, err
-	}
-
 	ma, err := multiaddr.StringCast(multiaddrString)
 	if err != nil {
 		return nil, err
@@ -663,9 +653,30 @@ func (p *SyncProvider[StateT, ProposalT]) getDirectChannel(
 		return nil, err
 	}
 
+	var dialOpt grpc.DialOption
+	if p.config.Engine.DisableGlobalServiceAuthentication {
+		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
+	} else {
+		creds, err := p2p.NewPeerAuthenticator(
+			p.logger,
+			p.config.P2P,
+			nil,
+			nil,
+			nil,
+			nil,
+			[][]byte{peerId},
+			map[string]channel.AllowedPeerPolicyType{},
+			map[string]channel.AllowedPeerPolicyType{},
+		).CreateClientTLSCredentials(peerId)
+		if err != nil {
+			return nil, err
+		}
+		dialOpt = grpc.WithTransportCredentials(creds)
+	}
+
 	cc, err := grpc.NewClient(
 		mga.String(),
-		grpc.WithTransportCredentials(creds),
+		dialOpt,
 	)
 	return cc, err
 }
