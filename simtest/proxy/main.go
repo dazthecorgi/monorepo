@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -221,26 +220,17 @@ func main() {
 		ipToPeerID := make(map[string]peer.ID)
 
 		for i, n := range nodeInfos {
-			addr := n.StreamAddress()
 			pid, err := peer.Decode(n.PeerID)
 			if err != nil {
 				logger.Fatal("invalid peer ID in NODE_INFOS",
 					zap.String("name", n.Name), zap.String("peer_id", n.PeerID), zap.Error(err))
 			}
 
-			// Resolve the backend hostname to populate the IP→peerID map.
-			ips, err := net.LookupHost(n.Hostname)
-			if err != nil {
-				logger.Warn("could not resolve backend host for IP→peerID map",
-					zap.String("host", n.Hostname), zap.Error(err))
-			}
-			for _, ip := range ips {
-				ipToPeerID[ip] = pid
-			}
+			ipToPeerID[n.IpAddress] = pid
 
 			backends = append(backends, proxygrpc.BackendEntry{
 				ListenPort:  grpcBasePort + i + 1,
-				BackendAddr: addr,
+				BackendAddr: n.StreamAddress(),
 				PeerID:      pid,
 			})
 		}

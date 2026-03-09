@@ -50,19 +50,69 @@ func getArchiveServices(ctx context.Context, workDir string) ([]shared.NodeInfo,
 
 	nodes := make([]shared.NodeInfo, len(serviceNames))
 	for i, name := range serviceNames {
+		ip, err := resolveNodeIPAddress(workDir, name)
+		if err != nil {
+			return nil, err
+		}
 		port, err := resolveNodeStreamPort(workDir, name)
 		if err != nil {
 			return nil, err
 		}
 		nodes[i] = shared.NodeInfo{
 			Name:       name,
-			Hostname:   name,
+			IpAddress:  ip,
 			StreamPort: port,
 			PeerID:     peerIDs[name],
 		}
 	}
 
 	return nodes, nil
+}
+
+// composeNetworkMap maps network name to its configuration.
+// It handles both the sequence form (["net-a"]) and the mapping form
+// (net-a: {ipv4_address: ...}) that docker-compose allows.
+type composeNetworkMap map[string]struct {
+	IPv4Address string `yaml:"ipv4_address"`
+}
+
+func (m *composeNetworkMap) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.SequenceNode {
+		*m = composeNetworkMap{}
+		return nil
+	}
+	type alias composeNetworkMap
+	return value.Decode((*alias)(m))
+}
+
+// composeFileYAML is a minimal struct for unmarshalling docker-compose.yml.
+type composeFileYAML struct {
+	Services map[string]struct {
+		Networks composeNetworkMap `yaml:"networks"`
+	} `yaml:"services"`
+}
+
+// resolveNodeIPAddress parses docker-compose.yml and returns the static IPv4
+// address assigned to the given service.
+func resolveNodeIPAddress(workDir, serviceName string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(workDir, "docker-compose.yml"))
+	if err != nil {
+		return "", fmt.Errorf("failed to read docker-compose.yml: %w", err)
+	}
+	var compose composeFileYAML
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		return "", fmt.Errorf("failed to parse docker-compose.yml: %w", err)
+	}
+	svc, ok := compose.Services[serviceName]
+	if !ok {
+		return "", fmt.Errorf("service %q not found in docker-compose.yml", serviceName)
+	}
+	for _, netCfg := range svc.Networks {
+		if netCfg.IPv4Address != "" {
+			return netCfg.IPv4Address, nil
+		}
+	}
+	return "", fmt.Errorf("no ipv4_address found for service %q in docker-compose.yml", serviceName)
 }
 
 // nodeConfigYAML is a minimal struct for unmarshalling the fields we need from config.yml.
