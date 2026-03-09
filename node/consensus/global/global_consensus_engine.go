@@ -2998,7 +2998,7 @@ func (e *GlobalConsensusEngine) reportPeerInfoPeriodically(
 	ctx lifecycle.SignalerContext,
 ) {
 	e.logger.Info("starting periodic peer info reporting")
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
