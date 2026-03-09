@@ -86,7 +86,7 @@ services:
     image: quilibrium-node:latest
     networks:
       - archive-1-network
-    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
     depends_on:
       proxy:
         condition: service_healthy
@@ -114,7 +114,7 @@ services:
     image: quilibrium-node:latest
     networks:
       - archive-2-network
-    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
     depends_on:
       proxy:
         condition: service_healthy
@@ -142,7 +142,7 @@ services:
     image: quilibrium-node:latest
     networks:
       - archive-3-network
-    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
     depends_on:
       proxy:
         condition: service_healthy
@@ -170,7 +170,7 @@ services:
     image: quilibrium-node:latest
     networks:
       - archive-4-network
-    command: ["--network=1", "--signature-check=false", "--config=/root/config"]
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
     depends_on:
       proxy:
         condition: service_healthy
