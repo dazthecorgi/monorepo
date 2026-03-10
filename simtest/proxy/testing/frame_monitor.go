@@ -8,7 +8,6 @@ import (
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 )
 
@@ -39,16 +38,28 @@ type FrameMonitor struct {
 	statusMutex  sync.RWMutex
 }
 
-// NewFrameMonitor creates a new FrameMonitor instance
+// NodeTarget pairs a node address with gRPC dial options (e.g. TLS credentials).
+type NodeTarget struct {
+	Address  string
+	DialOpts []grpc.DialOption
+}
+
+// NewFrameMonitor creates a new FrameMonitor instance. Each NodeTarget
+// specifies the address and dial options (including TLS credentials) to use.
 func NewFrameMonitor(
 	ctx context.Context,
 	logger *zap.Logger,
 	stopFrame uint64,
-	nodeAddresses []string,
+	targets []NodeTarget,
 	pollInterval time.Duration,
 	minNodes int,
 	timeout time.Duration,
 ) (*FrameMonitor, error) {
+	nodeAddresses := make([]string, len(targets))
+	for i, t := range targets {
+		nodeAddresses[i] = t.Address
+	}
+
 	fm := FrameMonitor{
 		ctx:           ctx,
 		logger:        logger,
@@ -62,25 +73,21 @@ func NewFrameMonitor(
 		nodeStatuses:  make(map[string]*NodeFrameStatus),
 	}
 
-	for _, addr := range fm.nodeAddresses {
-		fm.logger.Debug("creating gRPC client", zap.String("address", addr))
+	for _, target := range targets {
+		fm.logger.Debug("creating gRPC client", zap.String("address", target.Address))
 
-		// Create gRPC connection with insecure credentials (for local simulation)
-		conn, err := grpc.NewClient(
-			addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		)
+		conn, err := grpc.NewClient(target.Address, target.DialOpts...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create gRPC connection to %s: %w", addr, err)
+			return nil, fmt.Errorf("failed to create gRPC connection to %s: %w", target.Address, err)
 		}
 
 		client := protobufs.NewGlobalServiceClient(conn)
-		fm.connections[addr] = conn
-		fm.clients[addr] = client
+		fm.connections[target.Address] = conn
+		fm.clients[target.Address] = client
 
 		// Initialize node status
-		fm.nodeStatuses[addr] = &NodeFrameStatus{
-			address: addr,
+		fm.nodeStatuses[target.Address] = &NodeFrameStatus{
+			address: target.Address,
 		}
 	}
 	return &fm, nil

@@ -140,12 +140,7 @@ type EngineConfig struct {
 
 	// Values used only for testing – do not override these in production, your
 	// node will get kicked out
-	//
-	// DisableGlobalServiceAuthentication disables mTLS on the gRPC server and
-	// uses insecure credentials for outbound gRPC connections. Only safe on an
-	// isolated local network (e.g. simtest). Never set this in production.
-	DisableGlobalServiceAuthentication bool `yaml:"disableGlobalServiceAuthentication"`
-	Difficulty                         uint32
+	Difficulty uint32
 	// Hypergraph rebuild range start
 	RebuildStart string
 	// Hypergraph rebuild range end

@@ -43,9 +43,9 @@ func getArchiveServices(ctx context.Context, workDir string) ([]shared.NodeInfo,
 		return nil, fmt.Errorf("no archive node addresses found")
 	}
 
-	peerIDs, err := resolveNodePeerIDs(workDir, serviceNames)
+	identities, err := resolveNodeIdentities(workDir, serviceNames)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve peer IDs: %w", err)
+		return nil, fmt.Errorf("failed to resolve node identities: %w", err)
 	}
 
 	nodes := make([]shared.NodeInfo, len(serviceNames))
@@ -58,11 +58,13 @@ func getArchiveServices(ctx context.Context, workDir string) ([]shared.NodeInfo,
 		if err != nil {
 			return nil, err
 		}
+		id := identities[name]
 		nodes[i] = shared.NodeInfo{
-			Name:       name,
-			IpAddress:  ip,
-			StreamPort: port,
-			PeerID:     peerIDs[name],
+			Name:        name,
+			IpAddress:   ip,
+			StreamPort:  port,
+			PeerID:      id.PeerID,
+			PeerPrivKey: id.PeerPrivKey,
 		}
 	}
 
@@ -123,10 +125,16 @@ type nodeConfigYAML struct {
 	} `yaml:"p2p"`
 }
 
-// resolveNodePeerIDs derives the peer ID for each named node from the
-// p2p.peerPrivKey field in its config.yml and returns a map from node name to peer ID.
-func resolveNodePeerIDs(execDir string, nodeNames []string) (map[string]string, error) {
-	result := make(map[string]string, len(nodeNames))
+// nodeIdentity holds the peer ID and raw private key for a node.
+type nodeIdentity struct {
+	PeerID      string
+	PeerPrivKey string
+}
+
+// resolveNodeIdentities derives the peer ID and preserves the hex-encoded
+// private key for each named node from its config.yml.
+func resolveNodeIdentities(execDir string, nodeNames []string) (map[string]nodeIdentity, error) {
+	result := make(map[string]nodeIdentity, len(nodeNames))
 	for _, name := range nodeNames {
 		name = strings.TrimSpace(name)
 		configFile := filepath.Join(execDir, "config", name+"-config", "config.yml")
@@ -153,7 +161,10 @@ func resolveNodePeerIDs(execDir string, nodeNames []string) (map[string]string, 
 		if err != nil {
 			return nil, fmt.Errorf("failed to derive peer ID for node %s: %w", name, err)
 		}
-		result[name] = pid.String()
+		result[name] = nodeIdentity{
+			PeerID:      pid.String(),
+			PeerPrivKey: cfg.P2P.PeerPrivKey,
+		}
 	}
 	return result, nil
 }

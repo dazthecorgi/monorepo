@@ -96,7 +96,6 @@ engine:
   allowExcessiveGOMAXPROCS: false
   blacklist: []
   alertKey: ""
-  disableGlobalServiceAuthentication: true
   difficulty: 0
   rebuildstart: ""
   rebuildend: ""

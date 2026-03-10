@@ -18,12 +18,14 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"google.golang.org/grpc"
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	proxygrpc "source.quilibrium.com/quilibrium/monorepo/simtest/proxy/grpc"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/testing"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
+	"source.quilibrium.com/quilibrium/monorepo/types/channel"
 )
 
 var configDirectory = flag.String(
@@ -202,17 +204,26 @@ func main() {
 		logger.Fatal("failed to parse NODE_INFOS", zap.Error(err))
 	}
 
-	nodeAddresses := make([]string, len(nodeInfos))
-	for i, n := range nodeInfos {
-		nodeAddresses[i] = n.StreamAddress()
-	}
-
-	var grpcProxy *proxygrpc.GRPCProxy
 	for _, n := range nodeInfos {
 		if n.PeerID == "" {
 			logger.Fatal("node info missing peer ID", zap.String("name", n.Name))
 		}
+		if n.PeerPrivKey == "" {
+			logger.Fatal("node info missing peer private key", zap.String("name", n.Name))
+		}
 	}
+
+	// Build a PeerAuthenticator for the proxy itself (used for client-side TLS
+	// when dialling backend nodes and for the frame monitor).
+	proxyAuth := p2p.NewPeerAuthenticator(
+		logger,
+		nodeConfig.P2P,
+		nil, nil, nil, nil, nil,
+		map[string]channel.AllowedPeerPolicyType{},
+		map[string]channel.AllowedPeerPolicyType{},
+	)
+
+	var grpcProxy *proxygrpc.GRPCProxy
 	if len(nodeInfos) > 0 {
 		const grpcBasePort = 9000
 
@@ -228,10 +239,33 @@ func main() {
 
 			ipToPeerID[n.IpAddress] = pid
 
+			// Server-side: impersonate the backend node using its private key.
+			nodeCfg := &config.P2PConfig{PeerPrivKey: n.PeerPrivKey}
+			nodeAuth := p2p.NewPeerAuthenticator(
+				logger, nodeCfg,
+				nil, nil, nil, nil, nil,
+				map[string]channel.AllowedPeerPolicyType{},
+				map[string]channel.AllowedPeerPolicyType{},
+			)
+			serverCreds, err := nodeAuth.CreateServerTLSCredentials()
+			if err != nil {
+				logger.Fatal("failed to create server TLS credentials for backend",
+					zap.String("name", n.Name), zap.Error(err))
+			}
+
+			// Client-side: dial backend using proxy's identity, verifying the backend's peer ID.
+			clientCreds, err := proxyAuth.CreateClientTLSCredentials([]byte(pid))
+			if err != nil {
+				logger.Fatal("failed to create client TLS credentials for backend",
+					zap.String("name", n.Name), zap.Error(err))
+			}
+
 			backends = append(backends, proxygrpc.BackendEntry{
 				ListenPort:  grpcBasePort + i + 1,
 				BackendAddr: n.StreamAddress(),
 				PeerID:      pid,
+				ServerCreds: serverCreds,
+				ClientCreds: clientCreds,
 			})
 		}
 
@@ -265,11 +299,26 @@ func main() {
 
 	logger.Info("Stop conditions", zap.Uint64("stop_frame", stopFrame), zap.Int("min_nodes", minNodes))
 
+	// Build frame monitor targets with TLS credentials for each node.
+	targets := make([]testing.NodeTarget, len(nodeInfos))
+	for i, n := range nodeInfos {
+		pid, _ := peer.Decode(n.PeerID) // already validated above
+		creds, err := proxyAuth.CreateClientTLSCredentials([]byte(pid))
+		if err != nil {
+			logger.Fatal("failed to create frame monitor TLS credentials",
+				zap.String("name", n.Name), zap.Error(err))
+		}
+		targets[i] = testing.NodeTarget{
+			Address:  n.StreamAddress(),
+			DialOpts: []grpc.DialOption{grpc.WithTransportCredentials(creds)},
+		}
+	}
+
 	frameMonitor, err := testing.NewFrameMonitor(
 		ctx,
 		logger,
 		stopFrame,
-		nodeAddresses,
+		targets,
 		pollInterval,
 		minNodes,
 		timeout,

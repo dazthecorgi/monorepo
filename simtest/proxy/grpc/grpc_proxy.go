@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	grpcpeer "google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -61,6 +61,11 @@ type BackendEntry struct {
 	// PeerID is the archive node's libp2p peer ID, used as the destination in
 	// partition checks.
 	PeerID peer.ID
+	// ServerCreds are the TLS credentials presented by the proxy listener
+	// impersonating the backend node.
+	ServerCreds credentials.TransportCredentials
+	// ClientCreds are the TLS credentials used when dialling the backend node.
+	ClientCreds credentials.TransportCredentials
 }
 
 // GRPCProxy proxies gRPC calls between archive nodes, enforcing network
@@ -98,6 +103,13 @@ func NewGRPCProxy(
 // all already-created resources are cleaned up before returning.
 func (g *GRPCProxy) Serve() error {
 	for i, backend := range g.backends {
+		if backend.ServerCreds == nil {
+			return fmt.Errorf("grpc proxy: backend %d (%s): ServerCreds is required", i, backend.BackendAddr)
+		}
+		if backend.ClientCreds == nil {
+			return fmt.Errorf("grpc proxy: backend %d (%s): ClientCreds is required", i, backend.BackendAddr)
+		}
+
 		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", backend.ListenPort))
 		if err != nil {
 			g.Close()
@@ -106,7 +118,7 @@ func (g *GRPCProxy) Serve() error {
 
 		cc, err := grpc.NewClient(
 			backend.BackendAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithTransportCredentials(backend.ClientCreds),
 		)
 		if err != nil {
 			ln.Close()
@@ -125,6 +137,7 @@ func (g *GRPCProxy) Serve() error {
 			//lint:ignore SA1019 ForceCodec is CallOption-only in grpc v1.72; CustomCodec is the only server-side option
 			grpc.CustomCodec(rawBytesCodec{}),
 			grpc.UnknownServiceHandler(g.makeHandler(backend.PeerID, cc)),
+			grpc.Creds(backend.ServerCreds),
 		)
 		g.servers = append(g.servers, srv)
 

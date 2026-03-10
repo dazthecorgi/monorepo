@@ -16,7 +16,6 @@ import (
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/consensus"
 	"source.quilibrium.com/quilibrium/monorepo/consensus/models"
@@ -653,26 +652,21 @@ func (p *SyncProvider[StateT, ProposalT]) getDirectChannel(
 		return nil, err
 	}
 
-	var dialOpt grpc.DialOption
-	if p.config.Engine.DisableGlobalServiceAuthentication {
-		dialOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
-	} else {
-		creds, err := p2p.NewPeerAuthenticator(
-			p.logger,
-			p.config.P2P,
-			nil,
-			nil,
-			nil,
-			nil,
-			[][]byte{peerId},
-			map[string]channel.AllowedPeerPolicyType{},
-			map[string]channel.AllowedPeerPolicyType{},
-		).CreateClientTLSCredentials(peerId)
-		if err != nil {
-			return nil, err
-		}
-		dialOpt = grpc.WithTransportCredentials(creds)
+	creds, err := p2p.NewPeerAuthenticator(
+		p.logger,
+		p.config.P2P,
+		nil,
+		nil,
+		nil,
+		nil,
+		[][]byte{peerId},
+		map[string]channel.AllowedPeerPolicyType{},
+		map[string]channel.AllowedPeerPolicyType{},
+	).CreateClientTLSCredentials(peerId)
+	if err != nil {
+		return nil, err
 	}
+	dialOpt := grpc.WithTransportCredentials(creds)
 
 	cc, err := grpc.NewClient(
 		mga.String(),
