@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"source.quilibrium.com/quilibrium/monorepo/config"
 	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	proxygrpc "source.quilibrium.com/quilibrium/monorepo/simtest/proxy/grpc"
@@ -213,8 +214,8 @@ func main() {
 		}
 	}
 
-	// Build a PeerAuthenticator for the proxy itself (used for client-side TLS
-	// when dialling backend nodes and for the frame monitor).
+	// Build a PeerAuthenticator for the proxy itself (used for the frame
+	// monitor's client-side TLS when polling backend nodes directly).
 	proxyAuth := p2p.NewPeerAuthenticator(
 		logger,
 		nodeConfig.P2P,
@@ -222,6 +223,31 @@ func main() {
 		map[string]channel.AllowedPeerPolicyType{},
 		map[string]channel.AllowedPeerPolicyType{},
 	)
+
+	// Pre-build a PeerAuthenticator per node so the proxy can impersonate any
+	// caller when forwarding to a backend.
+	type nodeIdent struct {
+		PeerID peer.ID
+		Auth   *p2p.PeerAuthenticator
+	}
+	nodeIdents := make([]nodeIdent, len(nodeInfos))
+	for i, n := range nodeInfos {
+		pid, err := peer.Decode(n.PeerID)
+		if err != nil {
+			logger.Fatal("invalid peer ID in NODE_INFOS",
+				zap.String("name", n.Name), zap.String("peer_id", n.PeerID), zap.Error(err))
+		}
+		cfg := &config.P2PConfig{PeerPrivKey: n.PeerPrivKey}
+		nodeIdents[i] = nodeIdent{
+			PeerID: pid,
+			Auth: p2p.NewPeerAuthenticator(
+				logger, cfg,
+				nil, nil, nil, nil, nil,
+				map[string]channel.AllowedPeerPolicyType{},
+				map[string]channel.AllowedPeerPolicyType{},
+			),
+		}
+	}
 
 	var grpcProxy *proxygrpc.GRPCProxy
 	if len(nodeInfos) > 0 {
@@ -231,41 +257,35 @@ func main() {
 		ipToPeerID := make(map[string]peer.ID)
 
 		for i, n := range nodeInfos {
-			pid, err := peer.Decode(n.PeerID)
-			if err != nil {
-				logger.Fatal("invalid peer ID in NODE_INFOS",
-					zap.String("name", n.Name), zap.String("peer_id", n.PeerID), zap.Error(err))
-			}
-
-			ipToPeerID[n.IpAddress] = pid
+			backend := nodeIdents[i]
+			ipToPeerID[n.IpAddress] = backend.PeerID
 
 			// Server-side: impersonate the backend node using its private key.
-			nodeCfg := &config.P2PConfig{PeerPrivKey: n.PeerPrivKey}
-			nodeAuth := p2p.NewPeerAuthenticator(
-				logger, nodeCfg,
-				nil, nil, nil, nil, nil,
-				map[string]channel.AllowedPeerPolicyType{},
-				map[string]channel.AllowedPeerPolicyType{},
-			)
-			serverCreds, err := nodeAuth.CreateServerTLSCredentials()
+			serverCreds, err := backend.Auth.CreateServerTLSCredentials()
 			if err != nil {
 				logger.Fatal("failed to create server TLS credentials for backend",
 					zap.String("name", n.Name), zap.Error(err))
 			}
 
-			// Client-side: dial backend using proxy's identity, verifying the backend's peer ID.
-			clientCreds, err := proxyAuth.CreateClientTLSCredentials([]byte(pid))
-			if err != nil {
-				logger.Fatal("failed to create client TLS credentials for backend",
-					zap.String("name", n.Name), zap.Error(err))
+			// Client-side: for each potential caller, create credentials that
+			// carry the caller's identity when connecting to this backend.
+			clientCredsPerCaller := make(map[peer.ID]credentials.TransportCredentials, len(nodeIdents))
+			for _, caller := range nodeIdents {
+				creds, err := caller.Auth.CreateClientTLSCredentials([]byte(backend.PeerID))
+				if err != nil {
+					logger.Fatal("failed to create client TLS credentials",
+						zap.String("caller", caller.PeerID.String()),
+						zap.String("backend", n.Name), zap.Error(err))
+				}
+				clientCredsPerCaller[caller.PeerID] = creds
 			}
 
 			backends = append(backends, proxygrpc.BackendEntry{
-				ListenPort:  grpcBasePort + i + 1,
-				BackendAddr: n.StreamAddress(),
-				PeerID:      pid,
-				ServerCreds: serverCreds,
-				ClientCreds: clientCreds,
+				ListenPort:           grpcBasePort + i + 1,
+				BackendAddr:          n.StreamAddress(),
+				PeerID:               backend.PeerID,
+				ServerCreds:          serverCreds,
+				ClientCredsPerCaller: clientCredsPerCaller,
 			})
 		}
 

@@ -64,8 +64,17 @@ type BackendEntry struct {
 	// ServerCreds are the TLS credentials presented by the proxy listener
 	// impersonating the backend node.
 	ServerCreds credentials.TransportCredentials
-	// ClientCreds are the TLS credentials used when dialling the backend node.
-	ClientCreds credentials.TransportCredentials
+	// ClientCredsPerCaller maps each potential caller's peer ID to the TLS
+	// credentials used when forwarding that caller's request to this backend.
+	// The credentials carry the caller's identity so the backend sees the
+	// original requester, not the proxy.
+	ClientCredsPerCaller map[peer.ID]credentials.TransportCredentials
+}
+
+// connKey identifies a (caller, backend) pair for connection caching.
+type connKey struct {
+	caller     peer.ID
+	backendIdx int
 }
 
 // GRPCProxy proxies gRPC calls between archive nodes, enforcing network
@@ -78,7 +87,7 @@ type GRPCProxy struct {
 	ipToPeerID  map[string]peer.ID
 	servers     []*grpc.Server
 	listeners   []net.Listener
-	conns       []*grpc.ClientConn
+	connMap     map[connKey]*grpc.ClientConn
 }
 
 // NewGRPCProxy creates a GRPCProxy. It does not start listening; call Serve.
@@ -102,12 +111,27 @@ func NewGRPCProxy(
 // an error if any listener or client connection cannot be created; in that case
 // all already-created resources are cleaned up before returning.
 func (g *GRPCProxy) Serve() error {
+	g.connMap = make(map[connKey]*grpc.ClientConn)
+
 	for i, backend := range g.backends {
 		if backend.ServerCreds == nil {
 			return fmt.Errorf("grpc proxy: backend %d (%s): ServerCreds is required", i, backend.BackendAddr)
 		}
-		if backend.ClientCreds == nil {
-			return fmt.Errorf("grpc proxy: backend %d (%s): ClientCreds is required", i, backend.BackendAddr)
+		if len(backend.ClientCredsPerCaller) == 0 {
+			return fmt.Errorf("grpc proxy: backend %d (%s): ClientCredsPerCaller is required", i, backend.BackendAddr)
+		}
+
+		// Pre-create one client connection per known caller for this backend.
+		for callerPeerID, creds := range backend.ClientCredsPerCaller {
+			cc, err := grpc.NewClient(
+				backend.BackendAddr,
+				grpc.WithTransportCredentials(creds),
+			)
+			if err != nil {
+				g.Close()
+				return fmt.Errorf("grpc proxy: dial backend %s as %s: %w", backend.BackendAddr, callerPeerID, err)
+			}
+			g.connMap[connKey{callerPeerID, i}] = cc
 		}
 
 		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", backend.ListenPort))
@@ -115,19 +139,7 @@ func (g *GRPCProxy) Serve() error {
 			g.Close()
 			return fmt.Errorf("grpc proxy: listen port %d: %w", backend.ListenPort, err)
 		}
-
-		cc, err := grpc.NewClient(
-			backend.BackendAddr,
-			grpc.WithTransportCredentials(backend.ClientCreds),
-		)
-		if err != nil {
-			ln.Close()
-			g.Close()
-			return fmt.Errorf("grpc proxy: dial backend %s: %w", backend.BackendAddr, err)
-		}
-
 		g.listeners = append(g.listeners, ln)
-		g.conns = append(g.conns, cc)
 
 		// grpc.CustomCodec sets a server-wide codec so RecvMsg/SendMsg operate on
 		// raw []byte rather than proto.Message, enabling transparent forwarding.
@@ -136,7 +148,7 @@ func (g *GRPCProxy) Serve() error {
 		srv := grpc.NewServer(
 			//lint:ignore SA1019 ForceCodec is CallOption-only in grpc v1.72; CustomCodec is the only server-side option
 			grpc.CustomCodec(rawBytesCodec{}),
-			grpc.UnknownServiceHandler(g.makeHandler(backend.PeerID, cc)),
+			grpc.UnknownServiceHandler(g.makeHandler(i, backend.PeerID)),
 			grpc.Creds(backend.ServerCreds),
 		)
 		g.servers = append(g.servers, srv)
@@ -164,7 +176,7 @@ func (g *GRPCProxy) Close() {
 	for _, srv := range g.servers {
 		srv.GracefulStop()
 	}
-	for _, cc := range g.conns {
+	for _, cc := range g.connMap {
 		_ = cc.Close()
 	}
 }
@@ -172,10 +184,12 @@ func (g *GRPCProxy) Close() {
 // makeHandler returns a grpc.StreamHandler that:
 //  1. Identifies the calling archive node by its remote IP.
 //  2. Checks the (source, dstPeerID) pair against the partition table.
-//  3. Bridges the ServerStream to a ClientStream on the backend, checking the
+//  3. Looks up the pre-created client connection for this (caller, backend) pair
+//     so the backend sees the original caller's TLS identity.
+//  4. Bridges the ServerStream to a ClientStream on the backend, checking the
 //     partition on every forwarded message and via a background monitor goroutine
 //     so that active streams are terminated within ~100 ms of a partition change.
-func (g *GRPCProxy) makeHandler(dstPeerID peer.ID, cc *grpc.ClientConn) grpc.StreamHandler {
+func (g *GRPCProxy) makeHandler(backendIdx int, dstPeerID peer.ID) grpc.StreamHandler {
 	return func(_ interface{}, serverStream grpc.ServerStream) error {
 		// Identify source peer from the incoming connection's remote IP.
 		p, ok := grpcpeer.FromContext(serverStream.Context())
@@ -189,6 +203,12 @@ func (g *GRPCProxy) makeHandler(dstPeerID peer.ID, cc *grpc.ClientConn) grpc.Str
 		srcPeerID, ok := g.ipToPeerID[host]
 		if !ok {
 			return status.Error(codes.Unauthenticated, "simtest: unknown source IP")
+		}
+
+		// Look up the client connection that carries this caller's identity.
+		cc, ok := g.connMap[connKey{srcPeerID, backendIdx}]
+		if !ok {
+			return status.Errorf(codes.Unauthenticated, "simtest: no client credentials for caller %s", srcPeerID)
 		}
 
 		// Reject immediately if already partitioned.

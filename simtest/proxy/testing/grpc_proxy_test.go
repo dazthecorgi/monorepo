@@ -29,7 +29,6 @@ const (
 	testKeyArchive1 = "6d5f7af9e6546ed193f2afea43afa807569770e995eb7fb813d1f6a89ef90f650dffa1161eddaf30b6794407c1253d73cdb317649a329d7cf71ed667a8ff39881cab52391e664c1b5b42e5ab841cafcf360ec0a72c4ec751e1ce88e3a367432ed7de2f9d9e6dd558aaf3c2efddb9cb5de600"
 	testKeyArchive2 = "09446ac1e249611be68fe6fc7babf77e6b04f6272d91d0c5d565ed2870d939a4e0bb149fa510d65a5f94803e34e938d40b50e1a68b8d927fc8431afcc3b4bf3988279f08f7dbeb3da0627bc9c40e28bb97c4edcff75f4d7eef14fd845079bd0607e834edc807d0dd17274b46eae73be21100"
 	testKeyArchive3 = "5b064e083bc058c86756ef4240bceabc356b9af058515a1bd35e20e0bc1ec08d1ec4ebae4717eb57975d1a5f64e68a1cdbbc8c2834f24dc2494abde22367a1db43cd2bde81e18959180a23ae10e33e83bdba0c4c3ea6db52dcdfde656e008d3ccc83b0badd891f34bf763e6d9ecc09349400"
-	testKeyProxy    = "4ee2b6a8ab83db96df43b1c5b0239ce3077fa14e77b23bb6b3ade66e50d4c7e1136478938e868439d2266d800c9cbd472ced584db4a651d8fdf18ebbc46deecb7007a316da06a22246cef854e241c33f295841d1e352b9c182d0b5057fac09e26c99b31dd19f80a6cc014e3b855bbabd8e80"
 )
 
 // testIdentity holds the derived peer.ID and a PeerAuthenticator for a test key.
@@ -197,23 +196,28 @@ func (s *stubGlobalServer) GetGlobalFrame(
 }
 
 // makeBackendEntry creates a BackendEntry with TLS credentials.
-// serverCreds impersonates backendID; clientCreds use proxyAuth to verify backendID.
-func makeBackendEntry(t *testing.T, listenPort int, backendAddr string, backendID testIdentity, proxyAuth *p2p.PeerAuthenticator) proxygrpc.BackendEntry {
+// serverCreds impersonate backendID; per-caller client creds carry each
+// caller's identity when forwarding to the backend.
+func makeBackendEntry(t *testing.T, listenPort int, backendAddr string, backendID testIdentity, callers []testIdentity) proxygrpc.BackendEntry {
 	t.Helper()
 	serverCreds, err := backendID.Auth.CreateServerTLSCredentials()
 	if err != nil {
 		t.Fatalf("makeBackendEntry: server creds: %v", err)
 	}
-	clientCreds, err := proxyAuth.CreateClientTLSCredentials([]byte(backendID.PeerID))
-	if err != nil {
-		t.Fatalf("makeBackendEntry: client creds: %v", err)
+	clientCredsPerCaller := make(map[peer.ID]credentials.TransportCredentials, len(callers))
+	for _, caller := range callers {
+		creds, err := caller.Auth.CreateClientTLSCredentials([]byte(backendID.PeerID))
+		if err != nil {
+			t.Fatalf("makeBackendEntry: client creds for caller %s: %v", caller.PeerID, err)
+		}
+		clientCredsPerCaller[caller.PeerID] = creds
 	}
 	return proxygrpc.BackendEntry{
-		ListenPort:  listenPort,
-		BackendAddr: backendAddr,
-		PeerID:      backendID.PeerID,
-		ServerCreds: serverCreds,
-		ClientCreds: clientCreds,
+		ListenPort:           listenPort,
+		BackendAddr:          backendAddr,
+		PeerID:               backendID.PeerID,
+		ServerCreds:          serverCreds,
+		ClientCredsPerCaller: clientCredsPerCaller,
 	}
 }
 
@@ -245,7 +249,6 @@ func TestGRPCProxy_ForwardsWhenNotPartitioned(t *testing.T) {
 	idA := newTestIdentity(t, testKeyArchive1)
 	idB := newTestIdentity(t, testKeyArchive2)
 	caller := newTestIdentity(t, testKeyArchive3)
-	proxy := newTestIdentity(t, testKeyProxy)
 
 	serverCredsA, err := idA.Auth.CreateServerTLSCredentials()
 	if err != nil {
@@ -262,10 +265,11 @@ func TestGRPCProxy_ForwardsWhenNotPartitioned(t *testing.T) {
 	defer cleanB()
 
 	portA, portB := freePort(t), freePort(t)
+	callers := []testIdentity{caller}
 
 	newProxy(t, p2p.NewNetworkPartitioner(), caller.PeerID, []proxygrpc.BackendEntry{
-		makeBackendEntry(t, portA, addrA, idA, proxy.Auth),
-		makeBackendEntry(t, portB, addrB, idB, proxy.Auth),
+		makeBackendEntry(t, portA, addrA, idA, callers),
+		makeBackendEntry(t, portB, addrB, idB, callers),
 	})
 
 	clientA, cleanCA := dialProxyTLS(t, portA, caller.Auth, idA.PeerID)
@@ -295,7 +299,6 @@ func TestGRPCProxy_BlocksWhenPartitioned(t *testing.T) {
 	idB := newTestIdentity(t, testKeyArchive1)
 	idC := newTestIdentity(t, testKeyArchive2)
 	caller := newTestIdentity(t, testKeyArchive3)
-	proxy := newTestIdentity(t, testKeyProxy)
 
 	serverCredsB, err := idB.Auth.CreateServerTLSCredentials()
 	if err != nil {
@@ -314,10 +317,11 @@ func TestGRPCProxy_BlocksWhenPartitioned(t *testing.T) {
 	portB, portC := freePort(t), freePort(t)
 	partitioner := p2p.NewNetworkPartitioner()
 	partitioner.PartitionPeers(caller.PeerID, idB.PeerID)
+	callers := []testIdentity{caller}
 
 	newProxy(t, partitioner, caller.PeerID, []proxygrpc.BackendEntry{
-		makeBackendEntry(t, portB, addrB, idB, proxy.Auth),
-		makeBackendEntry(t, portC, addrC, idC, proxy.Auth),
+		makeBackendEntry(t, portB, addrB, idB, callers),
+		makeBackendEntry(t, portC, addrC, idC, callers),
 	})
 
 	// cross-partition → Unavailable
@@ -341,7 +345,6 @@ func TestGRPCProxy_BlocksWhenPartitioned(t *testing.T) {
 func TestGRPCProxy_DynamicPartitionChange(t *testing.T) {
 	idB := newTestIdentity(t, testKeyArchive1)
 	caller := newTestIdentity(t, testKeyArchive2)
-	proxy := newTestIdentity(t, testKeyProxy)
 
 	serverCredsB, err := idB.Auth.CreateServerTLSCredentials()
 	if err != nil {
@@ -354,7 +357,7 @@ func TestGRPCProxy_DynamicPartitionChange(t *testing.T) {
 	portB := freePort(t)
 	partitioner := p2p.NewNetworkPartitioner()
 	newProxy(t, partitioner, caller.PeerID, []proxygrpc.BackendEntry{
-		makeBackendEntry(t, portB, addrB, idB, proxy.Auth),
+		makeBackendEntry(t, portB, addrB, idB, []testIdentity{caller}),
 	})
 
 	client, cleanC := dialProxyTLS(t, portB, caller.Auth, idB.PeerID)
@@ -384,7 +387,6 @@ func TestGRPCProxy_DynamicPartitionChange(t *testing.T) {
 func TestGRPCProxy_UnknownSourceIP(t *testing.T) {
 	idB := newTestIdentity(t, testKeyArchive1)
 	caller := newTestIdentity(t, testKeyArchive2)
-	proxy := newTestIdentity(t, testKeyProxy)
 
 	serverCredsB, err := idB.Auth.CreateServerTLSCredentials()
 	if err != nil {
@@ -395,7 +397,7 @@ func TestGRPCProxy_UnknownSourceIP(t *testing.T) {
 	defer cleanB()
 
 	portB := freePort(t)
-	be := makeBackendEntry(t, portB, addrB, idB, proxy.Auth)
+	be := makeBackendEntry(t, portB, addrB, idB, []testIdentity{caller})
 
 	// Empty ipToPeerID map — no IP is recognised.
 	grpcProxy := proxygrpc.NewGRPCProxy(
@@ -423,7 +425,6 @@ func TestGRPCProxy_MultipleBackends(t *testing.T) {
 	idB := newTestIdentity(t, testKeyArchive1)
 	idC := newTestIdentity(t, testKeyArchive2)
 	caller := newTestIdentity(t, testKeyArchive3) // set-1
-	proxy := newTestIdentity(t, testKeyProxy)
 
 	serverCredsB, err := idB.Auth.CreateServerTLSCredentials()
 	if err != nil {
@@ -442,10 +443,11 @@ func TestGRPCProxy_MultipleBackends(t *testing.T) {
 	portB, portC := freePort(t), freePort(t)
 	partitioner := p2p.NewNetworkPartitioner()
 	partitioner.PartitionPeers(caller.PeerID, idB.PeerID) // caller ↔ B blocked
+	callers := []testIdentity{caller}
 
 	newProxy(t, partitioner, caller.PeerID, []proxygrpc.BackendEntry{
-		makeBackendEntry(t, portB, addrB, idB, proxy.Auth),
-		makeBackendEntry(t, portC, addrC, idC, proxy.Auth),
+		makeBackendEntry(t, portB, addrB, idB, callers),
+		makeBackendEntry(t, portC, addrC, idC, callers),
 	})
 
 	clientB, cleanCB := dialProxyTLS(t, portB, caller.Auth, idB.PeerID)
@@ -467,7 +469,6 @@ func TestGRPCProxy_MultipleBackends(t *testing.T) {
 func TestGRPCProxy_ActiveStreamTerminatedOnPartition(t *testing.T) {
 	idB := newTestIdentity(t, testKeyArchive1)
 	caller := newTestIdentity(t, testKeyArchive2)
-	proxy := newTestIdentity(t, testKeyProxy)
 
 	serverCredsB, err := idB.Auth.CreateServerTLSCredentials()
 	if err != nil {
@@ -480,7 +481,7 @@ func TestGRPCProxy_ActiveStreamTerminatedOnPartition(t *testing.T) {
 	proxyPort := freePort(t)
 	partitioner := p2p.NewNetworkPartitioner()
 
-	be := makeBackendEntry(t, proxyPort, backendAddr, idB, proxy.Auth)
+	be := makeBackendEntry(t, proxyPort, backendAddr, idB, []testIdentity{caller})
 
 	grpcProxy := proxygrpc.NewGRPCProxy(
 		zap.NewNop(),
@@ -544,17 +545,17 @@ func TestGRPCProxy_ActiveStreamTerminatedOnPartition(t *testing.T) {
 	}
 }
 
-// ── Test 7: nil credentials rejected ─────────────────────────────────────────
+// ── Test 7: nil/empty credentials rejected ───────────────────────────────────
 
 func TestGRPCProxy_NilCredsRejected(t *testing.T) {
 	idB := newTestIdentity(t, testKeyArchive1)
-	proxy := newTestIdentity(t, testKeyProxy)
+	caller := newTestIdentity(t, testKeyArchive2)
 
 	serverCreds, err := idB.Auth.CreateServerTLSCredentials()
 	if err != nil {
 		t.Fatalf("server creds: %v", err)
 	}
-	clientCreds, err := proxy.Auth.CreateClientTLSCredentials([]byte(idB.PeerID))
+	clientCreds, err := caller.Auth.CreateClientTLSCredentials([]byte(idB.PeerID))
 	if err != nil {
 		t.Fatalf("client creds: %v", err)
 	}
@@ -565,22 +566,23 @@ func TestGRPCProxy_NilCredsRejected(t *testing.T) {
 	p1 := proxygrpc.NewGRPCProxy(zap.NewNop(), p2p.NewNetworkPartitioner(),
 		[]proxygrpc.BackendEntry{{
 			ListenPort: port, BackendAddr: "127.0.0.1:1234", PeerID: idB.PeerID,
-			ServerCreds: nil, ClientCreds: clientCreds,
+			ServerCreds:          nil,
+			ClientCredsPerCaller: map[peer.ID]credentials.TransportCredentials{caller.PeerID: clientCreds},
 		}}, map[string]peer.ID{})
 	if err := p1.Serve(); err == nil {
 		p1.Close()
 		t.Error("expected error for nil ServerCreds")
 	}
 
-	// nil ClientCreds
+	// empty ClientCredsPerCaller
 	p2 := proxygrpc.NewGRPCProxy(zap.NewNop(), p2p.NewNetworkPartitioner(),
 		[]proxygrpc.BackendEntry{{
 			ListenPort: port, BackendAddr: "127.0.0.1:1234", PeerID: idB.PeerID,
-			ServerCreds: serverCreds, ClientCreds: nil,
+			ServerCreds:          serverCreds,
+			ClientCredsPerCaller: nil,
 		}}, map[string]peer.ID{})
 	if err := p2.Serve(); err == nil {
 		p2.Close()
-		t.Error("expected error for nil ClientCreds")
+		t.Error("expected error for nil ClientCredsPerCaller")
 	}
 }
-
