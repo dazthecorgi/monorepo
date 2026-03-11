@@ -25,7 +25,7 @@ type TestResult struct {
 
 // runAllTests handles signal setup, spawns parallel test runs, and collects results.
 // Returns all results and whether execution was interrupted by a signal.
-func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, nodes []shared.NodeInfo, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string) (results []TestResult, interrupted bool) {
+func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, nodes []shared.NodeInfo, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string, saveLogsOnSuccess bool) (results []TestResult, interrupted bool) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -46,7 +46,7 @@ func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, e
 			logger.Debugw("Starting test run", "run_number", runNumber+1, "run_id", runID)
 
 			startTime := time.Now()
-			result := runSingleTest(ctx, runID, execDir, bearerToken, router, verbose, stopFrame, projectRegistry, parallel, nodes, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, outDir)
+			result := runSingleTest(ctx, runID, execDir, bearerToken, router, verbose, stopFrame, projectRegistry, parallel, nodes, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, outDir, saveLogsOnSuccess)
 			result.Duration = time.Since(startTime)
 
 			resultsChan <- result
@@ -65,7 +65,7 @@ func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, e
 	return results, ctx.Err() != nil
 }
 
-func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, parallelRuns int, nodes []shared.NodeInfo, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string) TestResult {
+func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, parallelRuns int, nodes []shared.NodeInfo, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string, saveLogsOnSuccess bool) TestResult {
 	// Create notification channel for this run
 	notifChan := make(chan shared.FrameNotification, 10)
 	router.Register(runID, notifChan)
@@ -136,8 +136,8 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 		}
 	}
 
-	// Save artifacts for failing tests before compose stack is torn down
-	if !result.Success && outDir != "" {
+	// Save artifacts for failing tests (and succeeding tests when -save-logs-on-success is set)
+	if (!result.Success || saveLogsOnSuccess) && outDir != "" {
 		cfg := testConfig{
 			RunID:        runID,
 			StopFrame:    stopFrame,

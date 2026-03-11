@@ -65,6 +65,12 @@ var outDir = flag.String(
 	"directory to save artifacts (config, result, logs) for failing test runs",
 )
 
+var saveLogsOnSuccess = flag.Bool(
+	"save-logs-on-success",
+	false,
+	"also save artifacts (config, result, logs) for successful test runs",
+)
+
 var logger *zap.SugaredLogger
 
 const (
@@ -227,7 +233,7 @@ func main() {
 	server := startNotificationServer(*listenPort, bearerToken, router)
 	projectRegistry := NewProjectRegistry()
 
-	results, interrupted := runAllTests(ctx, cancel, *parallel, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry, nodeAddresses, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, *outDir)
+	results, interrupted := runAllTests(ctx, cancel, *parallel, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry, nodeAddresses, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, *outDir, *saveLogsOnSuccess)
 
 	// Shutdown HTTP server gracefully
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
