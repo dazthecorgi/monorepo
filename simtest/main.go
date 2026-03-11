@@ -199,13 +199,13 @@ func main() {
 		execDir = cwd
 	}
 
-	nodeAddresses, err := getArchiveServices(ctx, execDir)
+	nodeInfos, err := getArchiveServices(ctx, execDir)
 	if err != nil {
 		logger.Errorw("Failed to get archive services", "error", err)
 		os.Exit(RunnerErrorExitCode)
 	}
 
-	minimumNodes := len(nodeAddresses)
+	minimumNodes := len(nodeInfos)
 	if *minNodes > 0 {
 		minimumNodes = *minNodes
 	}
@@ -238,7 +238,7 @@ func main() {
 		BearerToken:            bearerToken,
 		Verbose:                *verbose,
 		StopFrame:              *stopFrame,
-		Nodes:                  nodeAddresses,
+		Nodes:                  nodeInfos,
 		MinimumNodes:           minimumNodes,
 		RankPartitionsResolved: rankPartitionsResolved,
 		RankPartitionsOriginal: rankPartitionsOriginal,

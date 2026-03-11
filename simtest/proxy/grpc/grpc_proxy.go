@@ -2,12 +2,14 @@ package grpc
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -81,29 +83,32 @@ type connKey struct {
 // partitions from a shared Partitioner. One TCP listener per backend
 // gives the proxy port-based routing without inspecting request payloads.
 type GRPCProxy struct {
-	logger      *zap.Logger
-	partitioner Partitioner
-	backends    []BackendEntry
-	ipToPeerID  map[string]peer.ID
-	servers     []*grpc.Server
-	listeners   []net.Listener
-	connMap     map[connKey]*grpc.ClientConn
+	logger           *zap.Logger
+	partitioner      Partitioner
+	backends         []BackendEntry
+	peerIDToHostname map[peer.ID]string // peer ID → hostname, used for logging
+	servers          []*grpc.Server
+	listeners        []net.Listener
+	connMap          map[connKey]*grpc.ClientConn
 }
 
 // NewGRPCProxy creates a GRPCProxy. It does not start listening; call Serve.
-// ipToPeerID maps each archive node's container IP to its peer.ID so that the
-// proxy can identify the caller from the remote address of an incoming connection.
+// peerIDToHostname maps each archive node's peer.ID to its hostname for use
+// in log messages. Caller identity is determined from the TLS certificate
+// presented during the mTLS handshake, not from the source IP address —
+// this is necessary because archive nodes are created after the proxy is
+// healthy, so their IP addresses are not known at proxy startup.
 func NewGRPCProxy(
 	logger *zap.Logger,
 	partitioner Partitioner,
 	backends []BackendEntry,
-	ipToPeerID map[string]peer.ID,
+	peerIDToHostname map[peer.ID]string,
 ) *GRPCProxy {
 	return &GRPCProxy{
-		logger:      logger,
-		partitioner: partitioner,
-		backends:    backends,
-		ipToPeerID:  ipToPeerID,
+		logger:           logger,
+		partitioner:      partitioner,
+		backends:         backends,
+		peerIDToHostname: peerIDToHostname,
 	}
 }
 
@@ -182,7 +187,7 @@ func (g *GRPCProxy) Close() {
 }
 
 // makeHandler returns a grpc.StreamHandler that:
-//  1. Identifies the calling archive node by its remote IP.
+//  1. Identifies the calling archive node by its peer id from the TLS context.
 //  2. Checks the (source, dstPeerID) pair against the partition table.
 //  3. Looks up the pre-created client connection for this (caller, backend) pair
 //     so the backend sees the original caller's TLS identity.
@@ -191,24 +196,42 @@ func (g *GRPCProxy) Close() {
 //     so that active streams are terminated within ~100 ms of a partition change.
 func (g *GRPCProxy) makeHandler(backendIdx int, dstPeerID peer.ID) grpc.StreamHandler {
 	return func(_ interface{}, serverStream grpc.ServerStream) error {
-		// Identify source peer from the incoming connection's remote IP.
+		// Identify source peer from the TLS certificate presented during the
+		// mTLS handshake. The peer ID is encoded in the certificate's first
+		// DNSName as a hex-encoded xsign; the first 57 bytes are the Ed448
+		// public key from which the peer.ID is derived. This avoids any
+		// dependency on the caller's IP address.
 		p, ok := grpcpeer.FromContext(serverStream.Context())
 		if !ok {
 			return status.Error(codes.Unauthenticated, "simtest: no peer info in context")
 		}
-		host, _, err := net.SplitHostPort(p.Addr.String())
+		ti, ok := p.AuthInfo.(credentials.TLSInfo)
+		if !ok || len(ti.State.PeerCertificates) == 0 || len(ti.State.PeerCertificates[0].DNSNames) == 0 {
+			return status.Error(codes.Unauthenticated, "simtest: no peer certificate")
+		}
+		xsign, err := hex.DecodeString(ti.State.PeerCertificates[0].DNSNames[0])
+		if err != nil || len(xsign) < 57 {
+			return status.Error(codes.Unauthenticated, "simtest: invalid peer certificate")
+		}
+		pubkey, err := libp2pcrypto.UnmarshalEd448PublicKey(xsign[:57])
 		if err != nil {
-			return status.Error(codes.Unauthenticated, "simtest: failed to parse remote address")
+			return status.Errorf(codes.Unauthenticated, "simtest: invalid peer public key: %v", err)
 		}
-		srcPeerID, ok := g.ipToPeerID[host]
-		if !ok {
-			return status.Error(codes.Unauthenticated, "simtest: unknown source IP")
+		srcPeerID, err := peer.IDFromPublicKey(pubkey)
+		if err != nil {
+			return status.Errorf(codes.Unauthenticated, "simtest: failed to derive peer ID: %v", err)
 		}
+		srcHostname := g.peerIDToHostname[srcPeerID]
+		g.logger.Debug("incoming request",
+			zap.String("src_hostname", srcHostname),
+			zap.String("src_peer_id", srcPeerID.String()),
+			zap.String("dst_peer_id", dstPeerID.String()),
+		)
 
 		// Look up the client connection that carries this caller's identity.
 		cc, ok := g.connMap[connKey{srcPeerID, backendIdx}]
 		if !ok {
-			return status.Errorf(codes.Unauthenticated, "simtest: no client credentials for caller %s", srcPeerID)
+			return status.Errorf(codes.Unauthenticated, "simtest: no client credentials for caller %s (%s)", srcPeerID, srcHostname)
 		}
 
 		// Reject immediately if already partitioned.
