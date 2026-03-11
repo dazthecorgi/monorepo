@@ -14,7 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
+	"source.quilibrium.com/quilibrium/monorepo/simtest/rankpartitions"
 )
 
 var workingDir = flag.String(
@@ -103,12 +103,12 @@ func generateBearerToken() (string, error) {
 // resolveRankPartitions parses the raw JSON rank-partitions flag and resolves
 // node names to peer IDs. Returns the original entries (with service names) and
 // the peer-ID-resolved JSON string for the docker env var. Both are empty/nil if rawJSON is empty.
-func resolveRankPartitions(execDir, rawJSON string) (original []shared.RankPartitionEntry, resolved string, err error) {
+func resolveRankPartitions(execDir, rawJSON string) (original []rankpartitions.RankPartitionEntry, resolved string, err error) {
 	if rawJSON == "" {
 		return nil, "", nil
 	}
 
-	parsed, err := shared.ParseRankPartitions(rawJSON)
+	parsed, err := rankpartitions.ParseRankPartitions(rawJSON)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to parse -rank-partitions: %w", err)
 	}
@@ -120,12 +120,12 @@ func resolveRankPartitions(execDir, rawJSON string) (original []shared.RankParti
 	}
 	sort.Slice(ranks, func(i, j int) bool { return ranks[i] < ranks[j] })
 
-	original = make([]shared.RankPartitionEntry, 0, len(parsed))
+	original = make([]rankpartitions.RankPartitionEntry, 0, len(parsed))
 	for _, r := range ranks {
 		original = append(original, parsed[r])
 	}
 
-	resolvedEntries := make([]shared.RankPartitionEntry, 0, len(parsed))
+	resolvedEntries := make([]rankpartitions.RankPartitionEntry, 0, len(parsed))
 	for _, e := range original {
 		re := e
 		if len(e.Partition1) > 0 {

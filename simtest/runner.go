@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"source.quilibrium.com/quilibrium/monorepo/simtest/rankpartitions"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
@@ -31,7 +32,7 @@ type runConfig struct {
 	Nodes                  []shared.NodeInfo
 	MinimumNodes           int
 	RankPartitionsResolved string
-	RankPartitionsOriginal []shared.RankPartitionEntry
+	RankPartitionsOriginal []rankpartitions.RankPartitionEntry
 	OutDir                 string
 	SaveLogsOnSuccess      bool
 	Parallel               int

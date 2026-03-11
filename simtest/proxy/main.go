@@ -25,6 +25,7 @@ import (
 	proxygrpc "source.quilibrium.com/quilibrium/monorepo/simtest/proxy/grpc"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/testing"
+	"source.quilibrium.com/quilibrium/monorepo/simtest/rankpartitions"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 	"source.quilibrium.com/quilibrium/monorepo/types/channel"
 )
@@ -164,10 +165,10 @@ func main() {
 	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan, globalConsensusChan, partitioner)
 
 	// Parse per-rank partition schedule from RANK_PARTITIONS env var
-	var rankPartitions map[uint64]shared.RankPartitionEntry
+	var rankPartitions map[uint64]rankpartitions.RankPartitionEntry
 	if rpStr := os.Getenv("RANK_PARTITIONS"); rpStr != "" {
 		var err error
-		rankPartitions, err = shared.ParseRankPartitions(rpStr)
+		rankPartitions, err = rankpartitions.ParseRankPartitions(rpStr)
 		if err != nil {
 			logger.Fatal("failed to parse RANK_PARTITIONS", zap.Error(err))
 		}

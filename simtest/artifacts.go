@@ -8,15 +8,16 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"source.quilibrium.com/quilibrium/monorepo/simtest/rankpartitions"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
 type testConfig struct {
-	RunID          string                      `yaml:"run_id"`
-	StopFrame      int                         `yaml:"stop_frame"`
-	Nodes          []shared.NodeInfo           `yaml:"nodes"`
-	MinimumNodes   int                         `yaml:"minimum_nodes"`
-	RankPartitions []shared.RankPartitionEntry `yaml:"rank_partitions,omitempty"`
+	RunID          string                             `yaml:"run_id"`
+	StopFrame      int                                `yaml:"stop_frame"`
+	Nodes          []shared.NodeInfo                  `yaml:"nodes"`
+	MinimumNodes   int                                `yaml:"minimum_nodes"`
+	RankPartitions []rankpartitions.RankPartitionEntry `yaml:"rank_partitions,omitempty"`
 }
 
 type testResultOutput struct {

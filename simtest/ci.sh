@@ -27,6 +27,11 @@ lint_and_test() {
 cd "$SCRIPT_DIR"
 lint_and_test
 
+# ── simtest/rankpartitions ───────────────────────────────────────────────────────────
+
+cd "$SCRIPT_DIR/rankpartitions"
+lint_and_test
+
 # ── simtest/shared ───────────────────────────────────────────────────────────
 
 cd "$SCRIPT_DIR/shared"
