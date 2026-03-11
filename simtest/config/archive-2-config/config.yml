@@ -99,6 +99,7 @@ engine:
   difficulty: 0
   rebuildstart: ""
   rebuildend: ""
+  periodicSyncInterval: 10s
   framePublish:
     mode: ""
     threshold: 0
