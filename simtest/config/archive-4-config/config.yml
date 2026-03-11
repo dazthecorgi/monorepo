@@ -63,6 +63,7 @@ p2p:
   validateWorkers: 0
   subscriptionQueueSize: 0
   peerOutboundQueueSize: 0
+  reportPeerInfoInterval: 5s
 engine:
   provingKeyId: default-proving-key
   filter: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff

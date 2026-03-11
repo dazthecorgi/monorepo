@@ -2984,13 +2984,14 @@ func (e *GlobalConsensusEngine) signPeerInfo(
 	return e.pubsub.SignMessage(msg)
 }
 
-// reportPeerInfoPeriodically sends peer info over the peer info bitmask every
-// 5 minutes
+// reportPeerInfoPeriodically sends peer info over the peer info bitmask
+// periodically at the interval configured in p2p.reportPeerInfoInterval
+// (default 5 minutes).
 func (e *GlobalConsensusEngine) reportPeerInfoPeriodically(
 	ctx lifecycle.SignalerContext,
 ) {
 	e.logger.Info("starting periodic peer info reporting")
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(e.config.P2P.ReportPeerInfoInterval)
 	defer ticker.Stop()
 
 	for {
