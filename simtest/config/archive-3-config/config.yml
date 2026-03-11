@@ -101,6 +101,8 @@ engine:
   rebuildstart: ""
   rebuildend: ""
   periodicSyncInterval: 10s
+  globalFrameInterval: 1s
+  appFrameInterval: 1s
   framePublish:
     mode: ""
     threshold: 0

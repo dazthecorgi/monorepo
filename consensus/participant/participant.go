@@ -40,6 +40,7 @@ func NewParticipant[
 	timeoutAggregator consensus.TimeoutAggregator[VoteT],
 	finalizer consensus.Finalizer,
 	filter []byte,
+	frameInterval time.Duration,
 	trustedRoot *models.CertifiedState[StateT],
 	pending []*models.SignedProposal[StateT, VoteT],
 ) (*eventloop.EventLoop[StateT, VoteT], error) {
@@ -103,7 +104,7 @@ func NewParticipant[
 	pacemaker, err := pacemaker.NewPacemaker[StateT, VoteT](
 		filter,
 		controller,
-		pacemaker.NewStaticProposalDurationProvider(8*time.Second),
+		pacemaker.NewStaticProposalDurationProvider(frameInterval),
 		notifier,
 		consensusStore,
 		logger,

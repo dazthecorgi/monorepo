@@ -4051,7 +4051,8 @@ func (e *GlobalConsensusEngine) startConsensus(
 		e.voteAggregator,    // voteAggregator
 		e.timeoutAggregator, // timeoutAggregator
 		e,                   // finalizer
-		nil,                 // filter
+		nil,                               // filter
+		e.config.Engine.GlobalFrameInterval, // frameInterval
 		trustedRoot,
 		pending,
 	)
