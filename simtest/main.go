@@ -268,11 +268,6 @@ func runSingleMode(ctx context.Context, cancel context.CancelFunc, st commonStat
 // runExhaustiveMode generates every symmetry-unique rank partition schedule,
 // shuffles them, and runs them in a worker pool with optional resumption.
 func runExhaustiveMode(ctx context.Context, cancel context.CancelFunc, st commonState) {
-	if partitionStopRank == 0 && len(st.nodeInfos) > 1 {
-		logger.Errorw("--partition-stop-rank must be set (non-zero) for multi-node exhaustive runs")
-		os.Exit(RunnerErrorExitCode)
-	}
-
 	nodeNames := make([]string, len(st.nodeInfos))
 	nodeInfoMap := make(map[string]shared.NodeInfo, len(st.nodeInfos))
 	for i, n := range st.nodeInfos {
@@ -321,7 +316,7 @@ func runExhaustiveMode(ctx context.Context, cancel context.CancelFunc, st common
 			ExecDir:           st.execDir,
 			BearerToken:       bearerToken,
 			Verbose:           verbose,
-			StopFrame:         int(partitionStopRank),
+			StopFrame:         int(partitionStopRank) + 1,
 			Nodes:             st.nodeInfos,
 			MinimumNodes:      st.minimumNodes,
 			OutDir:            outDir,
