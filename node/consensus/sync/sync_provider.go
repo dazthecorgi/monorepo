@@ -58,10 +58,11 @@ type SyncProvider[StateT UniqueFrame, ProposalT any] struct {
 	hypergraph           hypergraph.Hypergraph
 	config               *config.Config
 
-	filter        []byte
-	proverAddress []byte
-	filterLabel   string
-	hooks         SyncProviderHooks[StateT, ProposalT]
+	filter               []byte
+	proverAddress        []byte
+	filterLabel          string
+	hooks                SyncProviderHooks[StateT, ProposalT]
+	periodicSyncInterval time.Duration
 }
 
 var _ consensus.SyncProvider[*protobufs.GlobalFrame] = (*SyncProvider[*protobufs.GlobalFrame, *protobufs.GlobalProposal])(nil)
@@ -104,6 +105,7 @@ func NewSyncProvider[StateT UniqueFrame, ProposalT any](
 		queuedStates:         make(chan syncRequest, defaultStateQueueCapacity),
 		filterLabel:          label,
 		hooks:                hooks,
+		periodicSyncInterval: config.Engine.PeriodicSyncInterval,
 	}
 }
 
@@ -134,7 +136,7 @@ func (p *SyncProvider[StateT, ProposalT]) Start(
 				request.peerId,
 				request.identity,
 			)
-		case <-time.After(10 * time.Second):
+		case <-time.After(p.periodicSyncInterval):
 			p.logger.Debug(
 				"periodic sync timer fired",
 				zap.Uint64("current_frame", (*p.forks.FinalizedState().State).GetFrameNumber()),
