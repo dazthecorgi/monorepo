@@ -168,7 +168,7 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 	env := map[string]string{
 		"RUN_ID":          runId,
 		"RUNNER_AUTH":     bearerToken,
-		"RUNNER_ADDRESS":  "host.docker.internal:" + strings.TrimPrefix(*listenPort, ":"),
+		"RUNNER_ADDRESS":  "host.docker.internal:" + strings.TrimPrefix(listenPort, ":"),
 		"STOP_FRAME":      fmt.Sprintf("%d", stopFrame),
 		"NODE_INFOS":      string(nodeInfosJSON),
 		"MIN_NODES":       fmt.Sprintf("%d", minimumNodes),

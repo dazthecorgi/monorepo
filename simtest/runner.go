@@ -3,13 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
 	"time"
-
-	"github.com/google/uuid"
 
 	"source.quilibrium.com/quilibrium/monorepo/simtest/rankpartitions"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
@@ -38,48 +32,6 @@ type runConfig struct {
 	Parallel               int
 }
 
-// runAllTests handles signal setup, spawns parallel test runs, and collects results.
-// Returns all results and whether execution was interrupted by a signal.
-func runAllTests(ctx context.Context, cancel context.CancelFunc, cfg runConfig, router *NotificationRouter, projectRegistry *ProjectRegistry) (results []TestResult, interrupted bool) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigChan
-		logger.Infow("Received interrupt signal, initiating shutdown", "signal", sig)
-		cancel()
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(cfg.Parallel)
-	resultsChan := make(chan TestResult, cfg.Parallel)
-
-	for i := 0; i < cfg.Parallel; i++ {
-		go func(runNumber int) {
-			defer wg.Done()
-
-			runID := uuid.New().String()
-			logger.Debugw("Starting test run", "run_number", runNumber+1, "run_id", runID)
-
-			startTime := time.Now()
-			result := runSingleTest(ctx, runID, cfg, router, projectRegistry)
-			result.Duration = time.Since(startTime)
-
-			resultsChan <- result
-		}(i)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
-
-	for result := range resultsChan {
-		results = append(results, result)
-	}
-
-	return results, ctx.Err() != nil
-}
-
 func runSingleTest(ctx context.Context, runID string, cfg runConfig, router *NotificationRouter, projectRegistry *ProjectRegistry) TestResult {
 	// Create notification channel for this run
 	notifChan := make(chan shared.FrameNotification, 10)
@@ -88,6 +40,8 @@ func runSingleTest(ctx context.Context, runID string, cfg runConfig, router *Not
 	defer close(notifChan)
 
 	projectName := fmt.Sprintf("simtest_run_%s", runID)
+
+	logger.Infow("Starting test", "run_id", runID, "rank_partitions", cfg.RankPartitionsOriginal)
 
 	// Start compose stack
 	if err := executeTest(ctx, runID, cfg.ExecDir, cfg.BearerToken, projectName, cfg.StopFrame, cfg.Verbose, cfg.Parallel, cfg.Nodes, cfg.MinimumNodes, cfg.RankPartitionsResolved); err != nil {
