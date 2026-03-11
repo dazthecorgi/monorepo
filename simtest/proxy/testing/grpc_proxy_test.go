@@ -221,12 +221,10 @@ func makeBackendEntry(t *testing.T, listenPort int, backendAddr string, backendI
 	}
 }
 
-// newProxy is a convenience wrapper that creates and starts a GRPCProxy with
-// the test's loopback IP mapped to srcPeerID.
+// newProxy is a convenience wrapper that creates and starts a GRPCProxy.
 func newProxy(
 	t *testing.T,
 	partitioner *p2p.NetworkPartitioner,
-	srcPeerID peer.ID,
 	backends []proxygrpc.BackendEntry,
 ) *proxygrpc.GRPCProxy {
 	t.Helper()
@@ -234,7 +232,7 @@ func newProxy(
 		zap.NewNop(),
 		partitioner,
 		backends,
-		map[string]peer.ID{"127.0.0.1": srcPeerID},
+		map[peer.ID]string{},
 	)
 	if err := proxy.Serve(); err != nil {
 		t.Fatalf("proxy.Serve: %v", err)
@@ -267,7 +265,7 @@ func TestGRPCProxy_ForwardsWhenNotPartitioned(t *testing.T) {
 	portA, portB := freePort(t), freePort(t)
 	callers := []testIdentity{caller}
 
-	newProxy(t, p2p.NewNetworkPartitioner(), caller.PeerID, []proxygrpc.BackendEntry{
+	newProxy(t, p2p.NewNetworkPartitioner(), []proxygrpc.BackendEntry{
 		makeBackendEntry(t, portA, addrA, idA, callers),
 		makeBackendEntry(t, portB, addrB, idB, callers),
 	})
@@ -319,7 +317,7 @@ func TestGRPCProxy_BlocksWhenPartitioned(t *testing.T) {
 	partitioner.PartitionPeers(caller.PeerID, idB.PeerID)
 	callers := []testIdentity{caller}
 
-	newProxy(t, partitioner, caller.PeerID, []proxygrpc.BackendEntry{
+	newProxy(t, partitioner, []proxygrpc.BackendEntry{
 		makeBackendEntry(t, portB, addrB, idB, callers),
 		makeBackendEntry(t, portC, addrC, idC, callers),
 	})
@@ -356,7 +354,7 @@ func TestGRPCProxy_DynamicPartitionChange(t *testing.T) {
 
 	portB := freePort(t)
 	partitioner := p2p.NewNetworkPartitioner()
-	newProxy(t, partitioner, caller.PeerID, []proxygrpc.BackendEntry{
+	newProxy(t, partitioner, []proxygrpc.BackendEntry{
 		makeBackendEntry(t, portB, addrB, idB, []testIdentity{caller}),
 	})
 
@@ -382,11 +380,12 @@ func TestGRPCProxy_DynamicPartitionChange(t *testing.T) {
 	}
 }
 
-// ── Test 4: unknown source IP ─────────────────────────────────────────────────
+// ── Test 4: caller not registered in connMap ──────────────────────────────────
 
-func TestGRPCProxy_UnknownSourceIP(t *testing.T) {
+func TestGRPCProxy_UnknownCallerRejected(t *testing.T) {
 	idB := newTestIdentity(t, testKeyArchive1)
-	caller := newTestIdentity(t, testKeyArchive2)
+	registeredCaller := newTestIdentity(t, testKeyArchive2)
+	unknownCaller := newTestIdentity(t, testKeyArchive3)
 
 	serverCredsB, err := idB.Auth.CreateServerTLSCredentials()
 	if err != nil {
@@ -397,25 +396,26 @@ func TestGRPCProxy_UnknownSourceIP(t *testing.T) {
 	defer cleanB()
 
 	portB := freePort(t)
-	be := makeBackendEntry(t, portB, addrB, idB, []testIdentity{caller})
+	// Only registeredCaller is in ClientCredsPerCaller; unknownCaller is not.
+	be := makeBackendEntry(t, portB, addrB, idB, []testIdentity{registeredCaller})
 
-	// Empty ipToPeerID map — no IP is recognised.
 	grpcProxy := proxygrpc.NewGRPCProxy(
 		zap.NewNop(),
 		p2p.NewNetworkPartitioner(),
 		[]proxygrpc.BackendEntry{be},
-		map[string]peer.ID{}, // intentionally empty
+		map[peer.ID]string{registeredCaller.PeerID: "archive-registered"},
 	)
 	if err := grpcProxy.Serve(); err != nil {
 		t.Fatalf("proxy.Serve: %v", err)
 	}
 	t.Cleanup(grpcProxy.Close)
 
-	client, cleanC := dialProxyTLS(t, portB, caller.Auth, idB.PeerID)
+	// unknownCaller connects — peer ID is not in connMap → Unauthenticated.
+	client, cleanC := dialProxyTLS(t, portB, unknownCaller.Auth, idB.PeerID)
 	defer cleanC()
 	_, err = client.GetGlobalFrame(context.Background(), &protobufs.GetGlobalFrameRequest{})
 	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unauthenticated {
-		t.Errorf("expected Unauthenticated for unknown IP, got %v", err)
+		t.Errorf("expected Unauthenticated for unknown caller, got %v", err)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestGRPCProxy_MultipleBackends(t *testing.T) {
 	partitioner.PartitionPeers(caller.PeerID, idB.PeerID) // caller ↔ B blocked
 	callers := []testIdentity{caller}
 
-	newProxy(t, partitioner, caller.PeerID, []proxygrpc.BackendEntry{
+	newProxy(t, partitioner, []proxygrpc.BackendEntry{
 		makeBackendEntry(t, portB, addrB, idB, callers),
 		makeBackendEntry(t, portC, addrC, idC, callers),
 	})
@@ -487,7 +487,7 @@ func TestGRPCProxy_ActiveStreamTerminatedOnPartition(t *testing.T) {
 		zap.NewNop(),
 		partitioner,
 		[]proxygrpc.BackendEntry{be},
-		map[string]peer.ID{"127.0.0.1": caller.PeerID},
+		map[peer.ID]string{caller.PeerID: "archive-test"},
 	)
 	if err := grpcProxy.Serve(); err != nil {
 		t.Fatalf("proxy.Serve: %v", err)
@@ -568,7 +568,7 @@ func TestGRPCProxy_NilCredsRejected(t *testing.T) {
 			ListenPort: port, BackendAddr: "127.0.0.1:1234", PeerID: idB.PeerID,
 			ServerCreds:          nil,
 			ClientCredsPerCaller: map[peer.ID]credentials.TransportCredentials{caller.PeerID: clientCreds},
-		}}, map[string]peer.ID{})
+		}}, map[peer.ID]string{})
 	if err := p1.Serve(); err == nil {
 		p1.Close()
 		t.Error("expected error for nil ServerCreds")
@@ -580,7 +580,7 @@ func TestGRPCProxy_NilCredsRejected(t *testing.T) {
 			ListenPort: port, BackendAddr: "127.0.0.1:1234", PeerID: idB.PeerID,
 			ServerCreds:          serverCreds,
 			ClientCredsPerCaller: nil,
-		}}, map[string]peer.ID{})
+		}}, map[peer.ID]string{})
 	if err := p2.Serve(); err == nil {
 		p2.Close()
 		t.Error("expected error for nil ClientCredsPerCaller")

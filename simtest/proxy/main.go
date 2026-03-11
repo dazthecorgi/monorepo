@@ -254,11 +254,11 @@ func main() {
 		const grpcBasePort = 9000
 
 		backends := make([]proxygrpc.BackendEntry, 0, len(nodeInfos))
-		ipToPeerID := make(map[string]peer.ID)
+		peerIDToHostname := make(map[peer.ID]string, len(nodeInfos))
 
 		for i, n := range nodeInfos {
 			backend := nodeIdents[i]
-			ipToPeerID[n.IpAddress] = backend.PeerID
+			peerIDToHostname[backend.PeerID] = n.Hostname
 
 			// Server-side: impersonate the backend node using its private key.
 			serverCreds, err := backend.Auth.CreateServerTLSCredentials()
@@ -280,8 +280,14 @@ func main() {
 				clientCredsPerCaller[caller.PeerID] = creds
 			}
 
-			backends = append(backends, proxygrpc.BackendEntry{
-				ListenPort:           grpcBasePort + i + 1,
+			ordinal, err := n.Ordinal()
+		if err != nil {
+			logger.Fatal("failed to extract ordinal from node name",
+				zap.String("name", n.Name), zap.Error(err))
+		}
+
+		backends = append(backends, proxygrpc.BackendEntry{
+				ListenPort:           grpcBasePort + ordinal,
 				BackendAddr:          n.StreamAddress(),
 				PeerID:               backend.PeerID,
 				ServerCreds:          serverCreds,
@@ -289,7 +295,7 @@ func main() {
 			})
 		}
 
-		grpcProxy = proxygrpc.NewGRPCProxy(logger, partitioner, backends, ipToPeerID)
+		grpcProxy = proxygrpc.NewGRPCProxy(logger, partitioner, backends, peerIDToHostname)
 		if err := grpcProxy.Serve(); err != nil {
 			logger.Fatal("failed to start gRPC proxy", zap.Error(err))
 		}
