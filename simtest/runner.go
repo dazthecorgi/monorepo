@@ -23,9 +23,23 @@ type TestResult struct {
 	ArtifactDir  string
 }
 
+type runConfig struct {
+	ExecDir                string
+	BearerToken            string
+	Verbose                bool
+	StopFrame              int
+	Nodes                  []shared.NodeInfo
+	MinimumNodes           int
+	RankPartitionsResolved string
+	RankPartitionsOriginal []shared.RankPartitionEntry
+	OutDir                 string
+	SaveLogsOnSuccess      bool
+	Parallel               int
+}
+
 // runAllTests handles signal setup, spawns parallel test runs, and collects results.
 // Returns all results and whether execution was interrupted by a signal.
-func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, nodes []shared.NodeInfo, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string, saveLogsOnSuccess bool) (results []TestResult, interrupted bool) {
+func runAllTests(ctx context.Context, cancel context.CancelFunc, cfg runConfig, router *NotificationRouter, projectRegistry *ProjectRegistry) (results []TestResult, interrupted bool) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -35,10 +49,10 @@ func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, e
 	}()
 
 	var wg sync.WaitGroup
-	wg.Add(parallel)
-	resultsChan := make(chan TestResult, parallel)
+	wg.Add(cfg.Parallel)
+	resultsChan := make(chan TestResult, cfg.Parallel)
 
-	for i := 0; i < parallel; i++ {
+	for i := 0; i < cfg.Parallel; i++ {
 		go func(runNumber int) {
 			defer wg.Done()
 
@@ -46,7 +60,7 @@ func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, e
 			logger.Debugw("Starting test run", "run_number", runNumber+1, "run_id", runID)
 
 			startTime := time.Now()
-			result := runSingleTest(ctx, runID, execDir, bearerToken, router, verbose, stopFrame, projectRegistry, parallel, nodes, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, outDir, saveLogsOnSuccess)
+			result := runSingleTest(ctx, runID, cfg, router, projectRegistry)
 			result.Duration = time.Since(startTime)
 
 			resultsChan <- result
@@ -65,7 +79,7 @@ func runAllTests(ctx context.Context, cancel context.CancelFunc, parallel int, e
 	return results, ctx.Err() != nil
 }
 
-func runSingleTest(ctx context.Context, runID string, execDir string, bearerToken string, router *NotificationRouter, verbose bool, stopFrame int, projectRegistry *ProjectRegistry, parallelRuns int, nodes []shared.NodeInfo, minimumNodes int, rankPartitionsResolved string, rankPartitionsOriginal []shared.RankPartitionEntry, outDir string, saveLogsOnSuccess bool) TestResult {
+func runSingleTest(ctx context.Context, runID string, cfg runConfig, router *NotificationRouter, projectRegistry *ProjectRegistry) TestResult {
 	// Create notification channel for this run
 	notifChan := make(chan shared.FrameNotification, 10)
 	router.Register(runID, notifChan)
@@ -75,7 +89,7 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	projectName := fmt.Sprintf("simtest_run_%s", runID)
 
 	// Start compose stack
-	if err := executeTest(ctx, runID, execDir, bearerToken, projectName, stopFrame, verbose, parallelRuns, nodes, minimumNodes, rankPartitionsResolved); err != nil {
+	if err := executeTest(ctx, runID, cfg.ExecDir, cfg.BearerToken, projectName, cfg.StopFrame, cfg.Verbose, cfg.Parallel, cfg.Nodes, cfg.MinimumNodes, cfg.RankPartitionsResolved); err != nil {
 		logger.Errorw("Failed to start compose stack", "error", err, "run_id", runID)
 		return TestResult{
 			RunID:        runID,
@@ -91,7 +105,7 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 
-		if err := dockerComposeDown(cleanupCtx, execDir, projectName, verbose, parallelRuns); err != nil {
+		if err := dockerComposeDown(cleanupCtx, cfg.ExecDir, projectName, cfg.Verbose, cfg.Parallel); err != nil {
 			logger.Errorw("Failed to cleanup compose stack", "error", err, "run_id", runID, "project", projectName)
 		}
 
@@ -114,11 +128,11 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 				Success:      false,
 				ErrorMessage: n.SafetyError,
 			}
-		} else if n.NodesReachedStopFrame != minimumNodes {
+		} else if n.NodesReachedStopFrame != cfg.MinimumNodes {
 			result = TestResult{
 				RunID:        runID,
 				Success:      false,
-				ErrorMessage: fmt.Sprintf("expected %d nodes to reach stop frame, but got %d", minimumNodes, n.NodesReachedStopFrame),
+				ErrorMessage: fmt.Sprintf("expected %d nodes to reach stop frame, but got %d", cfg.MinimumNodes, n.NodesReachedStopFrame),
 			}
 		} else {
 			result = TestResult{
@@ -137,15 +151,15 @@ func runSingleTest(ctx context.Context, runID string, execDir string, bearerToke
 	}
 
 	// Save artifacts for failing tests (and succeeding tests when -save-logs-on-success is set)
-	if (!result.Success || saveLogsOnSuccess) && outDir != "" {
-		cfg := testConfig{
-			RunID:        runID,
-			StopFrame:    stopFrame,
-			Nodes:        nodes,
-			MinimumNodes: minimumNodes,
-			RankPartitions: rankPartitionsOriginal,
+	if (!result.Success || cfg.SaveLogsOnSuccess) && cfg.OutDir != "" {
+		tcfg := testConfig{
+			RunID:          runID,
+			StopFrame:      cfg.StopFrame,
+			Nodes:          cfg.Nodes,
+			MinimumNodes:   cfg.MinimumNodes,
+			RankPartitions: cfg.RankPartitionsOriginal,
 		}
-		result.ArtifactDir = saveFailureArtifacts(outDir, runID, projectName, execDir, result, cfg)
+		result.ArtifactDir = saveFailureArtifacts(cfg.OutDir, runID, projectName, cfg.ExecDir, result, tcfg)
 	}
 
 	return result

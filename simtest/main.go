@@ -233,7 +233,20 @@ func main() {
 	server := startNotificationServer(*listenPort, bearerToken, router)
 	projectRegistry := NewProjectRegistry()
 
-	results, interrupted := runAllTests(ctx, cancel, *parallel, execDir, bearerToken, router, *verbose, *stopFrame, projectRegistry, nodeAddresses, minimumNodes, rankPartitionsResolved, rankPartitionsOriginal, *outDir, *saveLogsOnSuccess)
+	cfg := runConfig{
+		ExecDir:                execDir,
+		BearerToken:            bearerToken,
+		Verbose:                *verbose,
+		StopFrame:              *stopFrame,
+		Nodes:                  nodeAddresses,
+		MinimumNodes:           minimumNodes,
+		RankPartitionsResolved: rankPartitionsResolved,
+		RankPartitionsOriginal: rankPartitionsOriginal,
+		OutDir:                 *outDir,
+		SaveLogsOnSuccess:      *saveLogsOnSuccess,
+		Parallel:               *parallel,
+	}
+	results, interrupted := runAllTests(ctx, cancel, cfg, router, projectRegistry)
 
 	// Shutdown HTTP server gracefully
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
