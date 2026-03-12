@@ -844,7 +844,7 @@ func (b *BlossomSubProxy) Close() error {
 
 // extractRankFromConsensusMessage peeks at the 4-byte type prefix and decodes
 // the consensus message to extract its rank number.
-func extractRankFromConsensusMessage(data []byte) (uint64, bool) {
+func (b *BlossomSubProxy) extractRankFromConsensusMessage(data []byte) (uint64, bool) {
 	if len(data) < 4 {
 		return 0, false
 	}
@@ -856,14 +856,18 @@ func extractRankFromConsensusMessage(data []byte) (uint64, bool) {
 			return 0, false
 		}
 		if proposal.State != nil && proposal.State.Header != nil {
+			b.logger.Debug("decoded global proposal message for rank extraction", zap.Uint64("rank", proposal.State.Header.Rank))
 			return proposal.State.Header.Rank, true
 		}
+		b.logger.Warn("decoded global proposal message, but found no rank")
 		return 0, false
 	case protobufs.ProposalVoteType:
 		vote := &protobufs.ProposalVote{}
 		if err := vote.FromCanonicalBytes(data); err != nil {
+			b.logger.Warn("decoded proposal vote message, but found no rank")
 			return 0, false
 		}
+		b.logger.Debug("decoded proposal vote message for rank extraction", zap.Uint64("rank", vote.Rank))
 		return vote.Rank, true
 	case protobufs.TimeoutStateType:
 		timeout := &protobufs.TimeoutState{}
@@ -871,8 +875,10 @@ func extractRankFromConsensusMessage(data []byte) (uint64, bool) {
 			return 0, false
 		}
 		if timeout.Vote != nil {
+			b.logger.Debug("decoded timeout state message for rank extraction", zap.Uint64("rank", timeout.Vote.Rank))
 			return timeout.Vote.Rank, true
 		}
+		b.logger.Warn("decoded timeout state message, but found no rank")
 		return 0, false
 	default:
 		return 0, false
@@ -906,7 +912,7 @@ func (b *BlossomSubProxy) subscribeToGlobalConsensus() error {
 			case <-b.ctx.Done():
 				return nil
 			default:
-				rank, ok := extractRankFromConsensusMessage(message.Data)
+				rank, ok := b.extractRankFromConsensusMessage(message.Data)
 				if ok {
 					b.logger.Info("received global consensus message",
 						zap.Uint64("rank", rank))
