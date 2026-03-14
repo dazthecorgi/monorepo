@@ -42,8 +42,11 @@ var network = flag.Uint(
 	"sets the active network for the node (mainnet = 0, primary testnet = 1)",
 )
 
-func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, frameNumber uint64, notifType shared.NotificationType, frames []*testing.GlobalFrameWrapper, nodesReachedStopFrame, totalNodes int) error {
-	safetyError := testing.CheckSafety(frames)
+func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, stopFrame uint64, notifType shared.NotificationType, frames []*testing.GlobalFrameWrapper, nodesReachedStopFrame, totalNodes int) error {
+	var safetyError error
+	if len(frames) > 0 || notifType == shared.NotificationTypeTerminalFrame {
+		safetyError = testing.CheckSafety(frames)
+	}
 
 	var safetyErrorMsg string
 	if safetyError != nil {
@@ -53,7 +56,7 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, fr
 
 	notification := shared.FrameNotification{
 		RunID:                 runID,
-		FrameNumber:           frameNumber,
+		StopFrame:             stopFrame,
 		Type:                  notifType,
 		SafetyError:           safetyErrorMsg,
 		NodesReachedStopFrame: nodesReachedStopFrame,
@@ -282,12 +285,12 @@ func main() {
 			}
 
 			ordinal, err := n.Ordinal()
-		if err != nil {
-			logger.Fatal("failed to extract ordinal from node name",
-				zap.String("name", n.Name), zap.Error(err))
-		}
+			if err != nil {
+				logger.Fatal("failed to extract ordinal from node name",
+					zap.String("name", n.Name), zap.Error(err))
+			}
 
-		backends = append(backends, proxygrpc.BackendEntry{
+			backends = append(backends, proxygrpc.BackendEntry{
 				ListenPort:           grpcBasePort + ordinal,
 				BackendAddr:          n.StreamAddress(),
 				PeerID:               backend.PeerID,
@@ -320,9 +323,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO move these to config
+	globalTimeoutStr := os.Getenv("GLOBAL_TIMEOUT")
+	nodeCatchupTimeoutStr := os.Getenv("NODE_CATCHUP_TIMEOUT")
+
+	globalTimeout := 2 * time.Minute
+	if globalTimeoutStr != "" {
+		if d, err := time.ParseDuration(globalTimeoutStr); err == nil {
+			globalTimeout = d
+		}
+	}
+
+	nodeCatchupTimeout := 30 * time.Second
+	if nodeCatchupTimeoutStr != "" {
+		if d, err := time.ParseDuration(nodeCatchupTimeoutStr); err == nil {
+			nodeCatchupTimeout = d
+		}
+	}
+
 	pollInterval := 5 * time.Second
-	timeout := 2 * time.Minute
 
 	logger.Info("Stop conditions", zap.Uint64("stop_frame", stopFrame), zap.Int("min_nodes", minNodes))
 
@@ -348,7 +366,7 @@ func main() {
 		targets,
 		pollInterval,
 		minNodes,
-		timeout,
+		nodeCatchupTimeout,
 	)
 
 	if err != nil {
@@ -377,6 +395,8 @@ func main() {
 		}
 	}
 
+	globalTimer := time.NewTimer(globalTimeout)
+
 	go func() {
 		for {
 			select {
@@ -397,6 +417,8 @@ func main() {
 					logger.Info("received terminal frame over gossip network, monitoring all nodes now",
 						zap.Uint64("frame_number", frameNumber))
 
+					globalTimer.Stop()
+
 					nodesReachedStopFrame, totalNodes := frameMonitor.StartMonitoring()
 					logger.Info("all nodes reached terminal frame",
 						zap.Int("nodes_reached_stop_frame", nodesReachedStopFrame),
@@ -407,7 +429,7 @@ func main() {
 					globalFrames = append(globalFrames, committedFrames...)
 
 					err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
-						frameNumber, shared.NotificationTypeTerminalFrame, globalFrames,
+						stopFrame, shared.NotificationTypeTerminalFrame, globalFrames,
 						nodesReachedStopFrame, totalNodes)
 
 					cancel(err)
@@ -418,6 +440,15 @@ func main() {
 					return
 				}
 				applyRankPartition(rank)
+			case <-globalTimer.C:
+				logger.Warn("global timeout expired without seeing stop frame via gossip",
+					zap.Duration("global_timeout", globalTimeout),
+					zap.Uint64("stop_frame", stopFrame))
+				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
+					stopFrame, shared.NotificationTypeGlobalTimeout, globalFrames,
+					0, len(nodeInfos))
+				cancel(err)
+				return
 			}
 		}
 	}()

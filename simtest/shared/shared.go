@@ -10,6 +10,7 @@ type NotificationType string
 
 const (
 	NotificationTypeTerminalFrame NotificationType = "terminal_frame_reached"
+	NotificationTypeGlobalTimeout NotificationType = "global_timeout"
 )
 
 // NodeInfo holds per-node address and identity information.
@@ -32,7 +33,7 @@ func (n NodeInfo) Ordinal() (int, error) {
 
 type FrameNotification struct {
 	RunID                 string           `json:"run_id,omitempty"`
-	FrameNumber           uint64           `json:"frame_number"`
+	StopFrame           uint64           `json:"frame_number"`
 	Type                  NotificationType `json:"type"`
 	SafetyError           string           `json:"safety_error,omitempty"`
 	NodesReachedStopFrame int              `json:"nodes_reached_stop_frame"`

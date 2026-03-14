@@ -80,11 +80,9 @@ func startNotificationServer(port string, bearerToken string, router *Notificati
 
 		w.WriteHeader(http.StatusOK)
 
-		logger.Debugw("Received notification", "run_id", notification.RunID, "frame_number", notification.FrameNumber, "type", notification.Type, "safety_error", notification.SafetyError)
+		logger.Debugw("Received notification", "run_id", notification.RunID, "stop_frame", notification.StopFrame, "type", notification.Type, "safety_error", notification.SafetyError)
 
-		if notification.Type == shared.NotificationTypeTerminalFrame {
-			router.Route(notification)
-		}
+		router.Route(notification)
 	})
 
 	server := &http.Server{

@@ -71,9 +71,10 @@ func runSingleTest(ctx context.Context, runID string, cfg runConfig, router *Not
 	var result TestResult
 	select {
 	case n := <-notifChan:
-		logger.Debugw("Terminal frame reached",
+		logger.Debugw("Notification received",
 			"run_id", runID,
-			"frame_number", n.FrameNumber,
+			"notification_type", n.Type,
+			"stop_frame", n.StopFrame,
 			"nodes_reached_stop_frame", n.NodesReachedStopFrame,
 			"total_nodes", n.TotalNodes)
 
