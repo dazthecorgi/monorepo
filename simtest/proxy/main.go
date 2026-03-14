@@ -162,7 +162,7 @@ func main() {
 	logger.Info("Starting DHT-only node...")
 
 	globalFrameChan := make(chan *protobufs.GlobalFrame, 100)
-	globalConsensusChan := make(chan uint64, 100)
+	globalConsensusChan := make(chan p2p.ConsensusEvent, 100)
 
 	partitioner := p2p.NewNetworkPartitioner()
 	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan, globalConsensusChan, partitioner)
@@ -381,6 +381,7 @@ func main() {
 			return
 		}
 		if _, seen := ranksApplied[rank]; seen {
+			logger.Debug("already applied partition for rank", zap.Uint64("rank", rank))
 			return
 		}
 		ranksApplied[rank] = struct{}{}
@@ -396,6 +397,10 @@ func main() {
 	}
 
 	globalTimer := time.NewTimer(globalTimeout)
+
+	// timeoutSendersPerRank tracks unique TimeoutState senders (by prover filter)
+	// per rank to detect timeout-based rank advancement conditions.
+	timeoutSendersPerRank := make(map[uint64]map[string]struct{})
 
 	go func() {
 		for {
@@ -435,11 +440,37 @@ func main() {
 					cancel(err)
 					return
 				}
-			case rank, ok := <-globalConsensusChan:
+			case event, ok := <-globalConsensusChan:
 				if !ok {
 					return
 				}
-				applyRankPartition(rank)
+				if !event.IsTimeout {
+					applyRankPartition(event.Rank)
+				} else {
+					rank := event.Rank
+					senderKey := string(event.SenderAddress)
+					if len(senderKey) == 0 {
+						break
+					}
+					senders := timeoutSendersPerRank[rank]
+					if senders == nil {
+						senders = make(map[string]struct{})
+						timeoutSendersPerRank[rank] = senders
+					}
+					senders[senderKey] = struct{}{}
+					count := len(senders)
+					n := len(nodeInfos)
+					allNodesTimedOut := count >= n
+					if allNodesTimedOut {
+						logger.Info("advancing rank due to timeout condition",
+							zap.Uint64("rank", rank),
+							zap.Int("timeout_count", count),
+							zap.Int("total_nodes", n),
+							zap.Bool("all_nodes_timed_out", allNodesTimedOut),
+						)
+						applyRankPartition(rank + 1)
+					}
+				}
 			case <-globalTimer.C:
 				logger.Warn("global timeout expired without seeing stop frame via gossip",
 					zap.Duration("global_timeout", globalTimeout),

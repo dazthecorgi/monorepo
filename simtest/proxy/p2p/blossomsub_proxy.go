@@ -147,8 +147,17 @@ type BlossomSubProxy struct {
 	dht                 *dht.IpfsDHT
 	configDir           ConfigDir
 	globalFrameChan     chan<- *protobufs.GlobalFrame
-	globalConsensusChan chan<- uint64
+	globalConsensusChan chan<- ConsensusEvent
 	partitioner         *NetworkPartitioner
+}
+
+// ConsensusEvent carries information extracted from a gossip consensus message.
+// For TimeoutState messages, IsTimeout is true and SenderAddress holds the
+// sender's prover filter, used to count unique timed-out nodes.
+type ConsensusEvent struct {
+	Rank          uint64
+	IsTimeout     bool
+	SenderAddress []byte // set if IsTimeout is true
 }
 
 var ErrNoPeersAvailable = errors.New("no peers available")
@@ -160,7 +169,7 @@ func NewBlossomSubProxy(
 	logger *zap.Logger,
 	configDir ConfigDir,
 	globalFrameChan chan<- *protobufs.GlobalFrame,
-	globalConsensusChan chan<- uint64,
+	globalConsensusChan chan<- ConsensusEvent,
 	partitioner *NetworkPartitioner,
 ) *BlossomSubProxy {
 
@@ -843,45 +852,51 @@ func (b *BlossomSubProxy) Close() error {
 }
 
 // extractRankFromConsensusMessage peeks at the 4-byte type prefix and decodes
-// the consensus message to extract its rank number.
-func (b *BlossomSubProxy) extractRankFromConsensusMessage(data []byte) (uint64, bool) {
+// the consensus message to extract its rank number. For TimeoutState messages,
+// the second return value is the sender's prover filter (Vote.Filter); it is
+// nil for all other message types.
+func (b *BlossomSubProxy) extractRankFromConsensusMessage(data []byte) (uint64, []byte, bool) {
 	if len(data) < 4 {
-		return 0, false
+		return 0, nil, false
 	}
 	typePrefix := binary.BigEndian.Uint32(data[:4])
 	switch typePrefix {
 	case protobufs.GlobalProposalType:
 		proposal := &protobufs.GlobalProposal{}
 		if err := proposal.FromCanonicalBytes(data); err != nil {
-			return 0, false
+			return 0, nil, false
 		}
 		if proposal.State != nil && proposal.State.Header != nil {
 			b.logger.Debug("decoded global proposal message for rank extraction", zap.Uint64("rank", proposal.State.Header.Rank))
-			return proposal.State.Header.Rank, true
+			return proposal.State.Header.Rank, nil, true
 		}
 		b.logger.Warn("decoded global proposal message, but found no rank")
-		return 0, false
+		return 0, nil, false
 	case protobufs.ProposalVoteType:
 		vote := &protobufs.ProposalVote{}
 		if err := vote.FromCanonicalBytes(data); err != nil {
 			b.logger.Warn("decoded proposal vote message, but found no rank")
-			return 0, false
+			return 0, nil, false
 		}
 		b.logger.Debug("decoded proposal vote message for rank extraction", zap.Uint64("rank", vote.Rank))
-		return vote.Rank, true
+		return vote.Rank, nil, true
 	case protobufs.TimeoutStateType:
 		timeout := &protobufs.TimeoutState{}
 		if err := timeout.FromCanonicalBytes(data); err != nil {
-			return 0, false
+			return 0, nil, false
 		}
 		if timeout.Vote != nil {
 			b.logger.Debug("decoded timeout state message for rank extraction", zap.Uint64("rank", timeout.Vote.Rank))
-			return timeout.Vote.Rank, true
+			var senderAddress []byte
+			if sig := timeout.Vote.GetPublicKeySignatureBls48581(); sig != nil {
+				senderAddress = sig.Address
+			}
+			return timeout.Vote.Rank, senderAddress, true
 		}
 		b.logger.Warn("decoded timeout state message, but found no rank")
-		return 0, false
+		return 0, nil, false
 	default:
-		return 0, false
+		return 0, nil, false
 	}
 }
 
@@ -912,12 +927,20 @@ func (b *BlossomSubProxy) subscribeToGlobalConsensus() error {
 			case <-b.ctx.Done():
 				return nil
 			default:
-				rank, ok := b.extractRankFromConsensusMessage(message.Data)
+				rank, senderAddress, ok := b.extractRankFromConsensusMessage(message.Data)
 				if ok {
 					b.logger.Info("received global consensus message",
-						zap.Uint64("rank", rank))
+						zap.Uint64("rank", rank),
+						zap.Bool("is_timeout", senderAddress != nil),
+						zap.String("sender_address", hex.EncodeToString(senderAddress)),
+					)
+					event := ConsensusEvent{
+						Rank:          rank,
+						IsTimeout:     senderAddress != nil,
+						SenderAddress: senderAddress,
+					}
 					select {
-					case b.globalConsensusChan <- rank:
+					case b.globalConsensusChan <- event:
 					case <-b.ctx.Done():
 						return nil
 					}
