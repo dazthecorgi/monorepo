@@ -192,10 +192,11 @@ func (e *AppConsensusEngine) streamGlobalMessagesFromMaster(
 			ctx,
 			&protobufs.StreamGlobalMessagesRequest{},
 		)
-		if err != nil {
+		if err != nil || stream == nil {
 			e.logger.Warn("global message stream: failed to open stream",
 				zap.Error(err),
 			)
+			e.resetGlobalClient()
 			select {
 			case <-ctx.Done():
 				return
@@ -208,6 +209,7 @@ func (e *AppConsensusEngine) streamGlobalMessagesFromMaster(
 		e.receiveGlobalMessages(ctx, stream)
 
 		e.logger.Warn("global message stream disconnected, reconnecting")
+		e.resetGlobalClient()
 		select {
 		case <-ctx.Done():
 			return

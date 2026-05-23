@@ -92,6 +92,18 @@ func (m *mockWorkerManager) RangeWorkers() ([]*store.WorkerInfo, error) {
 	return out, nil
 }
 
+func (m *mockWorkerManager) RequestJoin(ctx context.Context, filters [][]byte, delegate []byte) error {
+	return nil
+}
+
+func (m *mockWorkerManager) SetManuallyManaged(coreId uint, manual bool) error {
+	return nil
+}
+
+func (m *mockWorkerManager) ManuallyManagedFilters() map[string]struct{} {
+	return nil
+}
+
 func (m *mockWorkerManager) ProposeAllocations(workerIds []uint, filters [][]byte) error {
 	m.lastWorkers = append([]uint(nil), workerIds...)
 	m.lastFiltersHex = make([]string, len(filters))

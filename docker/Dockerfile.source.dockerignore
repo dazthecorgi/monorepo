@@ -2,6 +2,10 @@
 **/build
 **/target
 **/generated
+!crates/libp2p-identity/src/generated
+!crates/libp2p-autonat/src/v1/generated
+!crates/libp2p-autonat/src/v2/generated
+!crates/libp2p-kad/src/generated
 
 # Generated CMake files
 **/CMakeCache.txt

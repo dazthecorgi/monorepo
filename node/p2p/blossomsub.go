@@ -98,8 +98,10 @@ type BlossomSub struct {
 	discovery              internal.PeerConnector
 	manualReachability     atomic.Pointer[bool]
 	p2pConfig              config.P2PConfig
+	bootstrapPeerIDs       map[peer.ID]struct{}
 	dht                    *dht.IpfsDHT
 	routingDiscovery       *routing.RoutingDiscovery
+	reconnectFailures      int
 	coreId                 uint
 	configDir              ConfigDir
 }
@@ -164,6 +166,7 @@ func NewBlossomSubWithHost(
 		signKey:                privKey,
 		peerScore:              make(map[string]*appScore),
 		p2pConfig:              *p2pConfig,
+		bootstrapPeerIDs:       make(map[peer.ID]struct{}),
 		coreId:                 coreId,
 	}
 
@@ -182,6 +185,9 @@ func NewBlossomSubWithHost(
 			panic(fmt.Sprintf("error for addr %v, %+v:", bh.Addrs()[0], err))
 		}
 		bootstrappers = append(bootstrappers, *ai)
+	}
+	for _, b := range bootstrappers {
+		bs.bootstrapPeerIDs[b.ID] = struct{}{}
 	}
 	kademliaDHT := initDHT(
 		ctx,
@@ -232,7 +238,7 @@ func NewBlossomSubWithHost(
 
 	internal.MonitorPeers(
 		ctx,
-		logger.Named("peer-monitor"),
+		logger.Named("peerMonitor"),
 		host,
 		p2pConfig.PingTimeout,
 		p2pConfig.PingPeriod,
@@ -538,6 +544,11 @@ func NewBlossomSub(
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+	bootstrapPeerIDs := make(map[peer.ID]struct{}, len(bootstrappers))
+	for _, b := range bootstrappers {
+		bootstrapPeerIDs[b.ID] = struct{}{}
+	}
+
 	bs := &BlossomSub{
 		ctx:                    ctx,
 		cancel:                 cancel,
@@ -548,6 +559,7 @@ func NewBlossomSub(
 		signKey:                privKey,
 		peerScore:              make(map[string]*appScore),
 		p2pConfig:              *p2pConfig,
+		bootstrapPeerIDs:       bootstrapPeerIDs,
 		derivedPeerID:          derivedPeerId,
 		coreId:                 coreId,
 		configDir:              configDir,
@@ -619,7 +631,7 @@ func NewBlossomSub(
 
 	internal.MonitorPeers(
 		ctx,
-		logger.Named("peer-monitor"),
+		logger.Named("peerMonitor"),
 		h,
 		p2pConfig.PingTimeout,
 		p2pConfig.PingPeriod,
@@ -895,6 +907,9 @@ func resourceManager(highWatermark int, allowed []peer.AddrInfo) (
 }
 
 func (b *BlossomSub) background(ctx context.Context) {
+	// Run an immediate check so recovery doesn't wait for the first tick.
+	b.checkAndReconnectPeers(ctx)
+
 	refreshScores := time.NewTicker(DecayInterval)
 	defer refreshScores.Stop()
 
@@ -914,16 +929,30 @@ func (b *BlossomSub) background(ctx context.Context) {
 	}
 }
 
+func (b *BlossomSub) nonBootstrapPeerCount() int {
+	count := 0
+	for _, p := range b.h.Network().Peers() {
+		if _, isBootstrap := b.bootstrapPeerIDs[p]; !isBootstrap {
+			count++
+		}
+	}
+	return count
+}
+
 func (b *BlossomSub) checkAndReconnectPeers(ctx context.Context) {
-	peerCount := len(b.h.Network().Peers())
+	peerCount := b.nonBootstrapPeerCount()
 	if peerCount >= b.p2pConfig.MinBootstrapPeers {
+		// Healthy peer count — reset consecutive failure counter so the
+		// next drop starts with a soft recovery.
+		b.reconnectFailures = 0
 		return
 	}
 
 	b.logger.Warn(
-		"low peer count, attempting to re-bootstrap and discover",
+		"low peer count, attempting recovery",
 		zap.Int("current_peers", peerCount),
-		zap.Int("min_bootstrap_peers", b.p2pConfig.MinBootstrapPeers),
+		zap.Int("min_peers", b.p2pConfig.MinBootstrapPeers),
+		zap.Int("consecutive_failures", b.reconnectFailures),
 	)
 
 	// Re-bootstrap the DHT to refresh the routing table. At startup,
@@ -946,15 +975,29 @@ func (b *BlossomSub) checkAndReconnectPeers(ctx context.Context) {
 		)
 	}
 
-	// Clear peerstore addresses for disconnected peers so we don't keep
-	// dialing stale/invalid addresses that were added in previous attempts.
-	for _, p := range b.h.Peerstore().Peers() {
-		if p == b.h.ID() {
-			continue
+	// Only clear stale peerstore addresses after several consecutive failed
+	// recovery attempts.  On transient connectivity blips (common on
+	// residential ISPs) the addresses are still valid and wiping them forces
+	// a full DHT rediscovery that is much slower than reconnecting directly.
+	// After 3 consecutive failures the addresses are likely genuinely stale,
+	// so clearing them lets discovery start fresh.
+	if b.reconnectFailures >= 3 {
+		cleared := 0
+		for _, p := range b.h.Peerstore().Peers() {
+			if p == b.h.ID() {
+				continue
+			}
+			if b.h.Network().Connectedness(p) != network.Connected &&
+				b.h.Network().Connectedness(p) != network.Limited {
+				b.h.Peerstore().ClearAddrs(p)
+				cleared++
+			}
 		}
-		if b.h.Network().Connectedness(p) != network.Connected &&
-			b.h.Network().Connectedness(p) != network.Limited {
-			b.h.Peerstore().ClearAddrs(p)
+		if cleared > 0 {
+			b.logger.Info(
+				"cleared stale peerstore addresses after repeated failures",
+				zap.Int("cleared", cleared),
+			)
 		}
 	}
 
@@ -962,13 +1005,16 @@ func (b *BlossomSub) checkAndReconnectPeers(ctx context.Context) {
 		b.logger.Error("peer reconnect failed", zap.Error(err))
 	}
 
-	newCount := len(b.h.Network().Peers())
+	newCount := b.nonBootstrapPeerCount()
 	if newCount >= b.p2pConfig.MinBootstrapPeers {
+		b.reconnectFailures = 0
 		b.logger.Info("peer reconnect succeeded", zap.Int("peers", newCount))
 	} else {
+		b.reconnectFailures++
 		b.logger.Warn(
 			"peer reconnect: still low peer count, will retry at next interval",
 			zap.Int("peers", newCount),
+			zap.Int("consecutive_failures", b.reconnectFailures),
 		)
 	}
 }
@@ -1317,7 +1363,7 @@ func (b *BlossomSub) startConnectivityService() {
 	server := grpc.NewServer()
 	protobufs.RegisterConnectivityServiceServer(
 		server,
-		newConnectivityService(b.logger.Named("connectivity-service"), b.h),
+		newConnectivityService(b.logger.Named("connectivityService"), b.h),
 	)
 
 	go func() {
