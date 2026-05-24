@@ -164,6 +164,11 @@ pub struct GlobalConsumer {
     /// frame. Mirrors Go's `OnQuorumCertificateTriggeredRankChange`
     /// at `consensus_protocol.go:622`.
     on_qc_observed: Option<QcObservedHook>,
+    /// Optional hook fired alongside `on_qc_observed`, responsible for
+    /// publishing the finalized `GlobalFrame` (with the QC's BLS
+    /// aggregate signature grafted in) on the `GLOBAL_FRAME` bitmask.
+    /// Mirrors the publish at `consensus_protocol.go:689`.
+    on_publish_finalized_frame: Option<PublishFinalizedFrameHook>,
 }
 
 /// Trait for publishing consensus messages to the network.
@@ -186,6 +191,7 @@ impl GlobalConsumer {
         Self {
             publisher: None,
             on_qc_observed: None,
+            on_publish_finalized_frame: None,
         }
     }
 
@@ -193,6 +199,7 @@ impl GlobalConsumer {
         Self {
             publisher: Some(publisher),
             on_qc_observed: None,
+            on_publish_finalized_frame: None,
         }
     }
 
@@ -203,6 +210,19 @@ impl GlobalConsumer {
         Self {
             publisher: Some(publisher),
             on_qc_observed: Some(on_qc_observed),
+            on_publish_finalized_frame: None,
+        }
+    }
+
+    pub fn with_hooks(
+        publisher: Option<std::sync::Arc<dyn ConsensusPublisher>>,
+        on_qc_observed: Option<QcObservedHook>,
+        on_publish_finalized_frame: Option<PublishFinalizedFrameHook>,
+    ) -> Self {
+        Self {
+            publisher,
+            on_qc_observed,
+            on_publish_finalized_frame,
         }
     }
 }
@@ -219,6 +239,9 @@ impl Consumer<GlobalState, GlobalVote> for GlobalConsumer {
     fn on_receive_quorum_certificate(&self, current_rank: u64, qc: &dyn QuorumCertificate) {
         tracing::info!(rank = current_rank, qc_rank = qc.rank(), "received QC");
         if let Some(ref hook) = self.on_qc_observed {
+            hook(qc);
+        }
+        if let Some(ref hook) = self.on_publish_finalized_frame {
             hook(qc);
         }
     }
@@ -573,6 +596,16 @@ pub type IncorporatedStateHook =
 /// `OnQuorumCertificateTriggeredRankChange` at
 /// `consensus_protocol.go:622`.
 pub type QcObservedHook = std::sync::Arc<
+    dyn Fn(&dyn QuorumCertificate) + Send + Sync,
+>;
+
+/// Hook fired from `on_receive_quorum_certificate` so the node binary
+/// can publish the finalized `GlobalFrame` (with the QC's BLS
+/// aggregate signature grafted into its header) on the
+/// `GLOBAL_FRAME` bitmask. All clock-store / frame-lookup state stays
+/// in the node binary — the engine just notifies. Mirrors Go's
+/// publish at `consensus_protocol.go:689`.
+pub type PublishFinalizedFrameHook = std::sync::Arc<
     dyn Fn(&dyn QuorumCertificate) + Send + Sync,
 >;
 
