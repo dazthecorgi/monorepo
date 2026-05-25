@@ -3177,76 +3177,6 @@ async fn run_master_node(
                                         }
                                     })
                                 };
-                                // Port of consensus_protocol.go:678-690.
-                                // When a QC is observed, look up the
-                                // candidate frame it certifies, graft
-                                // the QC's BLS aggregate signature into
-                                // the header, canonical-encode, and
-                                // publish on GLOBAL_FRAME so peers
-                                // (and the simtest proxy) see finalized
-                                // frames flow over gossip.
-                                let publish_finalized_frame_hook:
-                                    quil_engine::consensus_glue::PublishFinalizedFrameHook = {
-                                    let cs = sync_cs.clone();
-                                    let pubr = publisher.clone();
-                                    Arc::new(move |qc| {
-                                        use quil_types::store::ClockStore;
-                                        let cs_trait: &dyn ClockStore = cs.as_ref();
-                                        let qc_identity_hex = hex::encode(qc.identity());
-                                        tracing::info!(
-                                            rank = qc.rank(),
-                                            frame_number = qc.frame_number(),
-                                            identity = %qc_identity_hex,
-                                            "publish_finalized_frame_hook: looking up candidate",
-                                        );
-                                        let mut frame = match cs_trait
-                                            .get_global_clock_frame_candidate(
-                                                qc.frame_number(),
-                                                qc.identity().as_slice(),
-                                            ) {
-                                            Ok(f) => f,
-                                            Err(e) => {
-                                                tracing::info!(
-                                                    error = %e,
-                                                    rank = qc.rank(),
-                                                    frame_number = qc.frame_number(),
-                                                    identity = %qc_identity_hex,
-                                                    "publish_finalized_frame_hook: no candidate — skipping",
-                                                );
-                                                return;
-                                            }
-                                        };
-                                        if let Some(h) = frame.header.as_mut() {
-                                            h.public_key_signature_bls48581 = Some(
-                                                quil_types::proto::keys::Bls48581AggregateSignature {
-                                                    signature: qc.aggregated_signature().signature().to_vec(),
-                                                    public_key: Some(
-                                                        quil_types::proto::keys::Bls48581g2PublicKey {
-                                                            key_value: qc.aggregated_signature().public_key().to_vec(),
-                                                        },
-                                                    ),
-                                                    bitmask: qc.aggregated_signature().bitmask().to_vec(),
-                                                },
-                                            );
-                                        }
-                                        match quil_engine::consensus_wire::encode_global_frame(&frame) {
-                                            Ok(bytes) => {
-                                                tracing::info!(
-                                                    rank = qc.rank(),
-                                                    frame_number = qc.frame_number(),
-                                                    bytes_len = bytes.len(),
-                                                    "publish_finalized_frame_hook: publishing",
-                                                );
-                                                pubr.publish_frame(bytes);
-                                            }
-                                            Err(e) => tracing::warn!(
-                                                error = %e,
-                                                rank = qc.rank(),
-                                                "publish_finalized_frame_hook: could not canonical-encode",
-                                            ),
-                                        }
-                                    })
-                                };
                                 // Load the persisted QC for the trusted
                                 // root's rank so the pacemaker boots
                                 // with a real BLS-aggregated QC instead
@@ -3298,7 +3228,6 @@ async fn run_master_node(
                                         on_finalized_state: Some(finalized_hook),
                                         on_incorporated_state: Some(incorporated_hook),
                                         on_qc_observed: Some(qc_observed_hook),
-                                        on_publish_finalized_frame: Some(publish_finalized_frame_hook),
                                         config_override: None,
                                         genesis_qc_override,
                                         // Persist consensus + liveness

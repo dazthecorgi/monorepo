@@ -57,12 +57,6 @@ pub struct ConsensusActivationParams {
     /// the clock store so `prove_next_state` for rank+1 can resolve
     /// the latest-QC frame_number/identity.
     pub on_qc_observed: Option<crate::consensus_glue::QcObservedHook>,
-    /// Hook fired alongside `on_qc_observed`, responsible for
-    /// publishing the finalized `GlobalFrame` (with the QC's BLS
-    /// aggregate signature attached) on the `GLOBAL_FRAME` bitmask.
-    /// Mirrors the publish at `consensus_protocol.go:689`.
-    pub on_publish_finalized_frame:
-        Option<crate::consensus_glue::PublishFinalizedFrameHook>,
     /// Override the consensus configuration. Production callers
     /// leave this at `None` to use the default 45s startup delay +
     /// 10s proposal duration. Integration tests set
@@ -173,11 +167,13 @@ pub fn activate_consensus(params: ConsensusActivationParams) -> Result<Consensus
     // ProverKick messages on equivocation.
     let publisher_for_follower = params.publisher.clone();
     let consumer: Arc<dyn quil_consensus::event_handler::Consumer<GlobalState, GlobalVote>> =
-        Arc::new(GlobalConsumer::with_hooks(
-            params.publisher,
-            params.on_qc_observed,
-            params.on_publish_finalized_frame,
-        ));
+        match (params.publisher, params.on_qc_observed) {
+            (Some(p), Some(qc_hook)) => {
+                Arc::new(GlobalConsumer::with_publisher_and_qc_hook(p, qc_hook))
+            }
+            (Some(p), None) => Arc::new(GlobalConsumer::with_publisher(p)),
+            (None, _) => Arc::new(GlobalConsumer::new()),
+        };
     let participant: Arc<
         dyn quil_consensus::pacemaker::ParticipantConsumer<GlobalState, GlobalVote>,
     > = Arc::new(GlobalParticipantConsumer);

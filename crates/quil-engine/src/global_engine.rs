@@ -172,7 +172,6 @@ impl GlobalConsensusEngine {
             on_finalized_state: None,
             on_incorporated_state: None,
             on_qc_observed: None,
-            on_publish_finalized_frame: None,
             config_override: None,
             genesis_qc_override: None,
             kv_db: None,
