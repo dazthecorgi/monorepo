@@ -11,6 +11,7 @@ use quil_keys::KeyManager as _;
 mod logging;
 
 mod prover_message_transport_prod;
+mod prover_tree_syncer_prod;
 
 mod release_check;
 
@@ -834,23 +835,32 @@ async fn run_master_node(
     // GLOBAL_FRAME subscription is archive-only — non-archive nodes
     // get the chain head via the archive poller and don't need the
     // gossip firehose (matches Go's behavior). Subscribing on a
-    // non-archive would just feed backfill / out-of-order frames
-    // into the receive loop for no benefit.
-    // Archive nodes subscribe to GLOBAL_FRAME + GLOBAL_PROVER for full
-    // gossip participation — they're the authoritative processors.
-    // Non-archive nodes skip both: they get global frames from the
-    // archive poller and submit prover messages via direct gRPC.
-    // GLOBAL_CONSENSUS and GLOBAL_PEER_INFO are universal.
+    // In Go, all global-bitmask subscriptions except GLOBAL_PEER_INFO
+    // are gated on `isConsensusParticipant()` which is `ArchiveMode ||
+    // Network == 99`. Non-archive nodes receive frames from the
+    // archive poller, submit prover messages via direct gRPC, and
+    // participate in per-shard consensus only (subscribed dynamically
+    // by the AppConsensusEngine). Subscribing to GLOBAL_CONSENSUS on
+    // a non-archive causes every global-frame vote/proposal from every
+    // archive to be relayed through the non-archive — massive
+    // bandwidth and processing overhead with zero benefit.
+    //
+    // Archives also do a bulk subscribe to `[0xFF; 32]` (catches all
+    // shard traffic via bloom overlap) for the app-frames queue.
     if archive_mode {
         p2p_handle.subscribe(quil_engine::bitmasks::GLOBAL_FRAME.to_vec()).await;
+        p2p_handle.subscribe(quil_engine::bitmasks::GLOBAL_CONSENSUS.to_vec()).await;
         p2p_handle.subscribe(quil_engine::bitmasks::GLOBAL_PROVER.to_vec()).await;
+        // Bulk shard subscription — mirrors Go's `bytes.Repeat([]byte{0xff}, 32)`
+        // inside `subscribeToGlobalConsensus`. Catches all per-shard frame/
+        // consensus/prover traffic via bloom-filter overlap.
+        p2p_handle.subscribe(vec![0xFFu8; 32]).await;
     }
-    p2p_handle.subscribe(quil_engine::bitmasks::GLOBAL_CONSENSUS.to_vec()).await;
     p2p_handle.subscribe(quil_engine::bitmasks::GLOBAL_PEER_INFO.to_vec()).await;
     if archive_mode {
-        info!("subscribed to all global bitmasks (archive mode)");
+        info!("subscribed to all global + bulk shard bitmasks (archive mode)");
     } else {
-        info!("subscribed to global consensus + peer info bitmasks (non-archive — GLOBAL_FRAME and GLOBAL_PROVER via direct RPC only)");
+        info!("subscribed to GLOBAL_PEER_INFO only (non-archive)");
     }
 
     // Apply engine blacklist — deny connections from blacklisted peers.
@@ -5562,6 +5572,8 @@ async fn run_worker_node(
     // master's stream listener; on single-machine setups it's the
     // local `/ip4/0.0.0.0/tcp/8340` and gets rewritten to localhost.
     let master_endpoint = quil_engine::worker_node::master_grpc_endpoint(&config);
+    // Clone for the syncer (master_endpoint gets moved into WorkerNodeConfig).
+    let master_endpoint_for_syncer = master_endpoint.clone();
 
     // Worker's Ed448 seed for mTLS to the master. The master's
     // GlobalService listener requires mTLS; without a seed configured
@@ -5639,6 +5651,30 @@ async fn run_worker_node(
     )
     .with_state_engines(crdt, exec_manager, inclusion_prover);
 
+    // Wire the prover-tree syncer so the worker can sync the global
+    // prover tree from the master at startup and before materializing
+    // frames with a prover-root mismatch. In Go, workers call
+    // `HyperSyncSelf` which dials the master's
+    // HypergraphComparisonService. We reuse the master_endpoint (the
+    // same one the gRPC message stream connects to — port 8340).
+    if let Some(seed) = worker_mtls_seed {
+        // Extract `host:port` from the master endpoint URL
+        // (`http://host:port`) for the syncer.
+        let stream_addr = master_endpoint_for_syncer
+            .strip_prefix("http://")
+            .unwrap_or(&master_endpoint_for_syncer)
+            .to_string();
+        let syncer: Arc<dyn quil_engine::prover_tree_syncer::ProverTreeSyncer> =
+            Arc::new(crate::prover_tree_syncer_prod::ProdProverTreeSyncer {
+                master_stream_addr: stream_addr,
+                hg_store: hg_store.clone(),
+                ed448_seed: seed,
+            });
+        worker_node = worker_node.with_prover_tree_syncer(syncer);
+    } else {
+        warn!("worker has no mTLS seed — prover-tree sync will be unavailable");
+    }
+
     // Outbound pubsub. Two mutually exclusive modes:
     //   * `engine.enable_master_proxy = true`  → dial the master's
     //     PubSubProxy on the peer mTLS listener and route all pubsub
@@ -5697,18 +5733,17 @@ async fn run_worker_node(
             .await
             .map_err(|e| anyhow::anyhow!("worker p2p start: {}", e))?;
         let handle = Arc::new(handle);
-        // Workers subscribe to GLOBAL_CONSENSUS (shard consensus
-        // messages) and GLOBAL_PEER_INFO (peer discovery). GLOBAL_FRAME
-        // and GLOBAL_PROVER are deliberately omitted — workers receive
-        // global frames via the master gRPC message stream, and prover
-        // messages route via direct gRPC to archives rather than
-        // BlossomSub gossip.
-        for bm in [
-            quil_engine::bitmasks::GLOBAL_CONSENSUS,
-            quil_engine::bitmasks::GLOBAL_PEER_INFO,
-        ] {
-            handle.subscribe(bm.to_vec()).await;
-        }
+        // Workers subscribe to GLOBAL_PEER_INFO only (peer discovery).
+        // GLOBAL_FRAME, GLOBAL_PROVER, and GLOBAL_CONSENSUS are
+        // deliberately omitted:
+        //   - GLOBAL_FRAME: received via master gRPC stream
+        //   - GLOBAL_PROVER: submitted via direct gRPC to archives
+        //   - GLOBAL_CONSENSUS: workers participate in PER-SHARD
+        //     consensus only (subscribed dynamically on Respawn via
+        //     `subscribe_to_shard_bitmasks`). Subscribing to GLOBAL
+        //     causes every worker to relay every shard's votes/
+        //     proposals — massive amplification with zero benefit.
+        handle.subscribe(quil_engine::bitmasks::GLOBAL_PEER_INFO.to_vec()).await;
         // Wire publish_fn → worker's own p2p.
         let p2p_for_publish = handle.clone();
         let publish_fn: quil_engine::worker_node::PublishFn =
