@@ -37,7 +37,6 @@ import (
 )
 
 var GLOBAL_CONSENSUS_BITMASK = []byte{0x00}
-var GLOBAL_FRAME_BITMASK = []byte{0x00, 0x00}
 var GLOBAL_PROVER_BITMASK = []byte{0x00, 0x00, 0x00}
 var GLOBAL_PEER_INFO_BITMASK = []byte{0x00, 0x00, 0x00, 0x00}
 var GLOBAL_ALERT_BITMASK = bytes.Repeat([]byte{0x00}, 16)
@@ -146,7 +145,6 @@ type BlossomSubProxy struct {
 	p2pConfig           config.P2PConfig
 	dht                 *dht.IpfsDHT
 	configDir           ConfigDir
-	globalFrameChan     chan<- *protobufs.GlobalFrame
 	globalConsensusChan chan<- ConsensusEvent
 	partitioner         *NetworkPartitioner
 }
@@ -156,6 +154,7 @@ type BlossomSubProxy struct {
 // sender's prover filter, used to count unique timed-out nodes.
 type ConsensusEvent struct {
 	Rank          uint64
+	FrameNumber   uint64
 	IsTimeout     bool
 	SenderAddress []byte // set if IsTimeout is true
 }
@@ -168,7 +167,6 @@ func NewBlossomSubProxy(
 	engineConfig *config.EngineConfig,
 	logger *zap.Logger,
 	configDir ConfigDir,
-	globalFrameChan chan<- *protobufs.GlobalFrame,
 	globalConsensusChan chan<- ConsensusEvent,
 	partitioner *NetworkPartitioner,
 ) *BlossomSubProxy {
@@ -218,9 +216,8 @@ func NewBlossomSubProxy(
 		p2pConfig:           *p2pConfig,
 		derivedPeerID:       derivedPeerId,
 		configDir:           configDir,
-		globalFrameChan:     globalFrameChan,
 		globalConsensusChan: globalConsensusChan,
-		partitioner:           partitioner,
+		partitioner:         partitioner,
 	}
 
 	h, err := libp2p.New(opts...)
@@ -851,61 +848,64 @@ func (b *BlossomSubProxy) Close() error {
 	return nil
 }
 
-// extractRankFromConsensusMessage peeks at the 4-byte type prefix and decodes
-// the consensus message to extract its rank number. For TimeoutState messages,
-// the second return value is the sender's prover filter (Vote.Filter); it is
-// nil for all other message types.
-func (b *BlossomSubProxy) extractRankFromConsensusMessage(data []byte) (uint64, []byte, bool) {
+// extractConsensusMessage peeks at the 4-byte type prefix and decodes the
+// consensus message to extract its rank and frame number. For TimeoutState
+// messages, the third return value is the sender's prover filter (Vote.Filter);
+// it is nil for all other message types.
+func (b *BlossomSubProxy) extractConsensusMessage(data []byte) (rank uint64, frameNumber uint64, senderAddress []byte, ok bool) {
 	if len(data) < 4 {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
 	typePrefix := binary.BigEndian.Uint32(data[:4])
 	switch typePrefix {
 	case protobufs.GlobalProposalType:
 		proposal := &protobufs.GlobalProposal{}
 		if err := proposal.FromCanonicalBytes(data); err != nil {
-			return 0, nil, false
+			return 0, 0, nil, false
 		}
 		if proposal.State != nil && proposal.State.Header != nil {
-			b.logger.Debug("decoded global proposal message for rank extraction", zap.Uint64("rank", proposal.State.Header.Rank))
-			return proposal.State.Header.Rank, nil, true
+			b.logger.Debug("decoded global proposal message",
+				zap.Uint64("rank", proposal.State.Header.Rank),
+				zap.Uint64("frame_number", proposal.State.Header.FrameNumber))
+			return proposal.State.Header.Rank, proposal.State.Header.FrameNumber, nil, true
 		}
-		b.logger.Warn("decoded global proposal message, but found no rank")
-		return 0, nil, false
+		b.logger.Warn("decoded global proposal message, but found no header")
+		return 0, 0, nil, false
 	case protobufs.ProposalVoteType:
 		vote := &protobufs.ProposalVote{}
 		if err := vote.FromCanonicalBytes(data); err != nil {
-			b.logger.Warn("decoded proposal vote message, but found no rank")
-			return 0, nil, false
+			b.logger.Warn("failed to decode proposal vote message")
+			return 0, 0, nil, false
 		}
-		b.logger.Debug("decoded proposal vote message for rank extraction", zap.Uint64("rank", vote.Rank))
-		return vote.Rank, nil, true
+		b.logger.Debug("decoded proposal vote message",
+			zap.Uint64("rank", vote.Rank),
+			zap.Uint64("frame_number", vote.FrameNumber))
+		return vote.Rank, vote.FrameNumber, nil, true
 	case protobufs.TimeoutStateType:
 		timeout := &protobufs.TimeoutState{}
 		if err := timeout.FromCanonicalBytes(data); err != nil {
-			return 0, nil, false
+			return 0, 0, nil, false
 		}
 		if timeout.Vote != nil {
-			b.logger.Debug("decoded timeout state message for rank extraction", zap.Uint64("rank", timeout.Vote.Rank))
+			b.logger.Debug("decoded timeout state message",
+				zap.Uint64("rank", timeout.Vote.Rank),
+				zap.Uint64("frame_number", timeout.Vote.FrameNumber))
 			var senderAddress []byte
 			if sig := timeout.Vote.GetPublicKeySignatureBls48581(); sig != nil {
 				senderAddress = sig.Address
 			}
-			return timeout.Vote.Rank, senderAddress, true
+			return timeout.Vote.Rank, timeout.Vote.FrameNumber, senderAddress, true
 		}
-		b.logger.Warn("decoded timeout state message, but found no rank")
-		return 0, nil, false
+		b.logger.Warn("decoded timeout state message, but found no vote")
+		return 0, 0, nil, false
 	default:
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
 }
 
 func (b *BlossomSubProxy) SubscribeToAllMessages() error {
 	if err := b.subscribeToGlobalConsensus(); err != nil {
 		return errors.Wrap(err, "subscribe to global consensus")
-	}
-	if err := b.subscribeToFrameMessages(); err != nil {
-		return errors.Wrap(err, "subscribe to frame messages")
 	}
 	if err := b.subscribeToProverMessages(); err != nil {
 		return errors.Wrap(err, "subscribe to prover messages")
@@ -927,15 +927,17 @@ func (b *BlossomSubProxy) subscribeToGlobalConsensus() error {
 			case <-b.ctx.Done():
 				return nil
 			default:
-				rank, senderAddress, ok := b.extractRankFromConsensusMessage(message.Data)
+				rank, frameNumber, senderAddress, ok := b.extractConsensusMessage(message.Data)
 				if ok {
 					b.logger.Info("received global consensus message",
 						zap.Uint64("rank", rank),
+						zap.Uint64("frame_number", frameNumber),
 						zap.Bool("is_timeout", senderAddress != nil),
 						zap.String("sender_address", hex.EncodeToString(senderAddress)),
 					)
 					event := ConsensusEvent{
 						Rank:          rank,
+						FrameNumber:   frameNumber,
 						IsTimeout:     senderAddress != nil,
 						SenderAddress: senderAddress,
 					}
@@ -952,45 +954,6 @@ func (b *BlossomSubProxy) subscribeToGlobalConsensus() error {
 		},
 	); err != nil {
 		return errors.Wrap(err, "subscribe to global consensus")
-	}
-
-	return nil
-}
-
-func (b *BlossomSubProxy) subscribeToFrameMessages() error {
-	if err := b.Subscribe(
-		GLOBAL_FRAME_BITMASK,
-		func(message *pb.Message) error {
-			select {
-			case <-b.ctx.Done():
-				return nil
-			default:
-				frame := &protobufs.GlobalFrame{}
-				if err := frame.FromCanonicalBytes(message.Data); err != nil {
-					b.logger.Error("failed to decode global frame", zap.Error(err))
-					return nil
-				}
-				b.logger.Info(
-					"received global frame message",
-					zap.Uint64("frame_number", frame.Header.FrameNumber),
-					zap.Uint64("rank", frame.Header.Rank),
-					zap.String("identity", hex.EncodeToString([]byte(frame.Identity()))),
-					zap.String("parent_selector", hex.EncodeToString(frame.Header.ParentSelector)),
-					zap.String("prover", hex.EncodeToString(frame.Header.Prover)),
-				)
-
-				// Push the frame to the channel
-				select {
-				case b.globalFrameChan <- frame:
-				case <-b.ctx.Done():
-					return nil
-				}
-
-				return nil
-			}
-		},
-	); err != nil {
-		return errors.Wrap(err, "subscribe to frame messages")
 	}
 
 	return nil

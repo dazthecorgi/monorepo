@@ -21,7 +21,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"source.quilibrium.com/quilibrium/monorepo/config"
-	"source.quilibrium.com/quilibrium/monorepo/protobufs"
 	proxygrpc "source.quilibrium.com/quilibrium/monorepo/simtest/proxy/grpc"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/p2p"
 	"source.quilibrium.com/quilibrium/monorepo/simtest/proxy/testing"
@@ -161,11 +160,10 @@ func main() {
 
 	logger.Info("Starting DHT-only node...")
 
-	globalFrameChan := make(chan *protobufs.GlobalFrame, 100)
 	globalConsensusChan := make(chan p2p.ConsensusEvent, 100)
 
 	partitioner := p2p.NewNetworkPartitioner()
-	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalFrameChan, globalConsensusChan, partitioner)
+	blossomSub := p2p.NewBlossomSubProxy(ctx, nodeConfig.P2P, nodeConfig.Engine, logger, p2p.ConfigDir(*configDirectory), globalConsensusChan, partitioner)
 
 	// Parse per-rank partition schedule from RANK_PARTITIONS env var
 	var rankPartitions map[uint64]rankpartitions.RankPartitionEntry
@@ -310,8 +308,6 @@ func main() {
 
 	logger.Info("DHT node running. Press Ctrl+C to stop.")
 
-	globalFrames := make([]*testing.GlobalFrameWrapper, 0, stopFrame)
-
 	minNodesStr := os.Getenv("MIN_NODES")
 	if minNodesStr == "" {
 		fmt.Fprintf(os.Stderr, "Error: MIN_NODES environment variable is required\n")
@@ -405,41 +401,6 @@ func main() {
 	go func() {
 		for {
 			select {
-			case frame, ok := <-globalFrameChan:
-				if !ok {
-					return
-				}
-				frameNumber := frame.Header.FrameNumber
-				rank := frame.Header.Rank
-				globalFrames = append(globalFrames, &testing.GlobalFrameWrapper{GlobalFrame: frame})
-				logger.Debug("received global frame",
-					zap.Uint64("frame_number", frameNumber),
-					zap.Uint64("rank", rank))
-
-				applyRankPartition(rank)
-
-				if frameNumber == stopFrame {
-					logger.Info("received terminal frame over gossip network, monitoring all nodes now",
-						zap.Uint64("frame_number", frameNumber))
-
-					globalTimer.Stop()
-
-					nodesReachedStopFrame, totalNodes := frameMonitor.StartMonitoring()
-					logger.Info("all nodes reached terminal frame",
-						zap.Int("nodes_reached_stop_frame", nodesReachedStopFrame),
-						zap.Int("total_nodes", totalNodes))
-
-					// Fetch committed frames from nodes and merge with gossip frames
-					committedFrames := frameMonitor.FetchCommittedFrames()
-					globalFrames = append(globalFrames, committedFrames...)
-
-					err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
-						stopFrame, shared.NotificationTypeTerminalFrame, globalFrames,
-						nodesReachedStopFrame, totalNodes)
-
-					cancel(err)
-					return
-				}
 			case event, ok := <-globalConsensusChan:
 				if !ok {
 					return
@@ -471,12 +432,34 @@ func main() {
 						applyRankPartition(rank + 1)
 					}
 				}
+
+				if event.FrameNumber >= stopFrame+1 {
+					logger.Info("observed proposal past stop frame, monitoring all nodes now",
+						zap.Uint64("event_frame_number", event.FrameNumber),
+						zap.Uint64("stop_frame", stopFrame))
+
+					globalTimer.Stop()
+
+					nodesReachedStopFrame, totalNodes := frameMonitor.StartMonitoring()
+					logger.Info("all nodes reached terminal frame",
+						zap.Int("nodes_reached_stop_frame", nodesReachedStopFrame),
+						zap.Int("total_nodes", totalNodes))
+
+					committedFrames := frameMonitor.FetchCommittedFrames()
+
+					err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
+						stopFrame, shared.NotificationTypeTerminalFrame, committedFrames,
+						nodesReachedStopFrame, totalNodes)
+
+					cancel(err)
+					return
+				}
 			case <-globalTimer.C:
 				logger.Warn("global timeout expired without seeing stop frame via gossip",
 					zap.Duration("global_timeout", globalTimeout),
 					zap.Uint64("stop_frame", stopFrame))
 				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
-					stopFrame, shared.NotificationTypeGlobalTimeout, globalFrames,
+					stopFrame, shared.NotificationTypeGlobalTimeout, nil,
 					0, len(nodeInfos))
 				cancel(err)
 				return
