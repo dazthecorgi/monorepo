@@ -78,19 +78,26 @@ func runSingleTest(ctx context.Context, runID string, cfg runConfig, router *Not
 			"nodes_reached_stop_frame", n.NodesReachedStopFrame,
 			"total_nodes", n.TotalNodes)
 
-		if n.SafetyError != "" {
+		switch {
+		case n.SafetyError != "":
 			result = TestResult{
 				RunID:        runID,
 				Success:      false,
 				ErrorMessage: n.SafetyError,
 			}
-		} else if n.NodesReachedStopFrame != cfg.MinimumNodes {
+		case n.NodesReachedStopFrame != cfg.MinimumNodes:
 			result = TestResult{
 				RunID:        runID,
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("expected %d nodes to reach stop frame, but got %d", cfg.MinimumNodes, n.NodesReachedStopFrame),
 			}
-		} else {
+		case n.EnrollmentError != "":
+			result = TestResult{
+				RunID:        runID,
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("enrollment verification failed: %s", n.EnrollmentError),
+			}
+		default:
 			result = TestResult{
 				RunID:   runID,
 				Success: true,

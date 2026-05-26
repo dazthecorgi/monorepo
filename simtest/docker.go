@@ -19,9 +19,11 @@ import (
 	"source.quilibrium.com/quilibrium/monorepo/simtest/shared"
 )
 
-// getArchiveServices discovers archive services from docker-compose.yml
-// and returns a list of NodeInfo for each archive node.
-func getArchiveServices(ctx context.Context, workDir string) ([]shared.NodeInfo, error) {
+// getNodeServices discovers both archive and client (non-archive) node services
+// from docker-compose.yml and returns a sorted list of NodeInfo. Archives are
+// tagged with IsArchive=true; clients with IsArchive=false. Archives are
+// returned before clients so the slice can be ranged in a stable order.
+func getNodeServices(ctx context.Context, workDir string) ([]shared.NodeInfo, error) {
 	cmd := exec.CommandContext(ctx, "docker", "compose", "config", "--services")
 	cmd.Dir = workDir
 
@@ -31,42 +33,64 @@ func getArchiveServices(ctx context.Context, workDir string) ([]shared.NodeInfo,
 	}
 
 	services := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var serviceNames []string
+	var (
+		archiveNames []string
+		clientNames  []string
+	)
 
 	for _, service := range services {
 		service = strings.TrimSpace(service)
-		if strings.HasPrefix(service, "archive-") {
-			serviceNames = append(serviceNames, service)
+		switch {
+		case strings.HasPrefix(service, "archive-"):
+			archiveNames = append(archiveNames, service)
+		case strings.HasPrefix(service, "client-"):
+			clientNames = append(clientNames, service)
 		}
 	}
 
-	if len(serviceNames) == 0 {
+	if len(archiveNames) == 0 {
 		return nil, fmt.Errorf("no archive node addresses found")
 	}
-	sort.Strings(serviceNames)
+	sort.Strings(archiveNames)
+	sort.Strings(clientNames)
 
-	identities, err := resolveNodeIdentities(workDir, serviceNames)
+	allNames := append([]string{}, archiveNames...)
+	allNames = append(allNames, clientNames...)
+
+	identities, err := resolveNodeIdentities(workDir, allNames)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve node identities: %w", err)
 	}
 
-	nodes := make([]shared.NodeInfo, len(serviceNames))
-	for i, name := range serviceNames {
+	nodes := make([]shared.NodeInfo, 0, len(allNames))
+	for _, name := range allNames {
 		port, err := resolveNodeStreamPort(workDir, name)
 		if err != nil {
 			return nil, err
 		}
 		id := identities[name]
-		nodes[i] = shared.NodeInfo{
-			Name:        name,
-			Hostname:    name,
-			StreamPort:  port,
-			PeerID:      id.PeerID,
-			PeerPrivKey: id.PeerPrivKey,
-		}
+		nodes = append(nodes, shared.NodeInfo{
+			Name:          name,
+			Hostname:      name,
+			StreamPort:    port,
+			NodePort:      8337, // plaintext NodeService gRPC port (rust default)
+			PeerID:        id.PeerID,
+			PeerPrivKey:   id.PeerPrivKey,
+			IsArchive:     strings.HasPrefix(name, "archive-"),
+			ProverAddress: clientProverAddresses[name], // empty for archives
+		})
 	}
 
 	return nodes, nil
+}
+
+// clientProverAddresses maps client service names to their pre-computed
+// prover_address (hex-encoded Poseidon(BLS pubkey)). The values are derived
+// once from each client's keys.yml via `node/tests/derive_prover_addr` and
+// pinned here so the simtest module doesn't need a Poseidon dependency.
+// To rotate a client key: re-run that helper and update the value below.
+var clientProverAddresses = map[string]string{
+	"client-1": "04c6d96f9b108107c62adf098b2994777da4b9f1d80e52ee303be72961df23bd",
 }
 
 // nodeConfigYAML is a minimal struct for unmarshalling the fields we need from config.yml.
@@ -165,6 +189,19 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 		return fmt.Errorf("failed to serialize node infos: %w", err)
 	}
 
+	// Global timeout for the proxy's "have we seen a frame past stop_frame"
+	// watchdog. Defaults to a generous bootstrap-padded budget derived from
+	// stopFrame; observed frame cadence in simtest is ~8s/frame and bootstrap
+	// adds ~60s. Operator can override via the GLOBAL_TIMEOUT env var.
+	globalTimeout := os.Getenv("GLOBAL_TIMEOUT")
+	if globalTimeout == "" {
+		secs := stopFrame*10 + 90
+		if secs < 120 {
+			secs = 120
+		}
+		globalTimeout = fmt.Sprintf("%ds", secs)
+	}
+
 	env := map[string]string{
 		"RUN_ID":          runId,
 		"RUNNER_AUTH":     bearerToken,
@@ -173,6 +210,7 @@ func executeTest(ctx context.Context, runId string, execDir string, bearerToken 
 		"NODE_INFOS":      string(nodeInfosJSON),
 		"MIN_NODES":       fmt.Sprintf("%d", minimumNodes),
 		"RANK_PARTITIONS": resolvedRankPartitions,
+		"GLOBAL_TIMEOUT":  globalTimeout,
 	}
 
 	if err := dockerComposeUp(ctx, execDir, projectName, env, verbose, parallelRuns); err != nil {

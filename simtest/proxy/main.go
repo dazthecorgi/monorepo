@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -41,7 +42,7 @@ var network = flag.Uint(
 	"sets the active network for the node (mainnet = 0, primary testnet = 1)",
 )
 
-func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, stopFrame uint64, notifType shared.NotificationType, frames []*testing.GlobalFrameWrapper, nodesReachedStopFrame, totalNodes int) error {
+func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, stopFrame uint64, notifType shared.NotificationType, frames []*testing.GlobalFrameWrapper, nodesReachedStopFrame, totalNodes int, enrollmentErr error) error {
 	var safetyError error
 	if len(frames) > 0 || notifType == shared.NotificationTypeTerminalFrame {
 		safetyError = testing.CheckSafety(frames)
@@ -53,6 +54,12 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, st
 		logger.Error("Safety violation detected", zap.String("error", safetyErrorMsg))
 	}
 
+	var enrollmentErrMsg string
+	if enrollmentErr != nil {
+		enrollmentErrMsg = enrollmentErr.Error()
+		logger.Error("Enrollment verification failed", zap.String("error", enrollmentErrMsg))
+	}
+
 	notification := shared.FrameNotification{
 		RunID:                 runID,
 		StopFrame:             stopFrame,
@@ -60,6 +67,7 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, st
 		SafetyError:           safetyErrorMsg,
 		NodesReachedStopFrame: nodesReachedStopFrame,
 		TotalNodes:            totalNodes,
+		EnrollmentError:       enrollmentErrMsg,
 	}
 
 	jsonData, err := json.Marshal(notification)
@@ -91,6 +99,81 @@ func notifyRunner(logger *zap.Logger, runnerAddress, authToken, runID string, st
 	}
 
 	return fmt.Errorf("runner returned non-success status: %d", resp.StatusCode)
+}
+
+// runEnrollmentMonitor verifies that every non-archive (client) node's
+// prover_address landed in at least `minArchives` archives' on-disk prover
+// registries. Returns nil when there are no clients, when the quorum is
+// reached, or with a descriptive error on timeout / config error.
+//
+// The monitor dials each archive's plaintext NodeService gRPC directly (the
+// proxy container shares each archive's bridge network, so `archive-N:port`
+// resolves) and calls GetVertexData on the GLOBAL_INTRINSIC_ADDRESS-prefixed
+// prover-vertex address.
+func runEnrollmentMonitor(
+	ctx context.Context,
+	logger *zap.Logger,
+	nodes []shared.NodeInfo,
+	minArchives int,
+	pollInterval, timeout time.Duration,
+) error {
+	var (
+		archives []testing.ArchiveTarget
+		clients  []testing.EnrollmentTarget
+	)
+	for _, n := range nodes {
+		if n.IsArchive {
+			port := n.NodePort
+			if port == 0 {
+				port = 8337
+			}
+			archives = append(archives, testing.ArchiveTarget{
+				Name:    n.Name,
+				Address: fmt.Sprintf("%s:%d", n.Hostname, port),
+			})
+			continue
+		}
+		// Non-archive (client) node — verify its enrollment.
+		if n.ProverAddress == "" {
+			logger.Warn("enrollment monitor: client missing ProverAddress, skipping",
+				zap.String("name", n.Name))
+			continue
+		}
+		raw, err := hex.DecodeString(n.ProverAddress)
+		if err != nil {
+			return fmt.Errorf("enrollment monitor: %s ProverAddress decode: %w", n.Name, err)
+		}
+		if len(raw) != 32 {
+			return fmt.Errorf("enrollment monitor: %s ProverAddress wrong length: got %d, want 32", n.Name, len(raw))
+		}
+		// Use the same NodePort the archives use; client config must
+		// have `listenGrpcMultiaddr` set for this to be reachable.
+		// When the client doesn't expose its NodeService, leave
+		// NodeAddress empty and the monitor will skip the client-side
+		// check (archive quorum still gates success).
+		clientPort := n.NodePort
+		if clientPort == 0 {
+			clientPort = 8337
+		}
+		clients = append(clients, testing.EnrollmentTarget{
+			Name:          n.Name,
+			ProverAddress: raw,
+			NodeAddress:   fmt.Sprintf("%s:%d", n.Hostname, clientPort),
+			// docker-compose pins the client to cpuset 0-2 (3 CPUs);
+			// the rust node's `available_parallelism - 1` worker
+			// pre-allocation produces exactly 2 workers, so the
+			// ProverJoin binds exactly 2 filters.
+			ExpectedCores: 2,
+		})
+	}
+
+	em, err := testing.NewEnrollmentMonitor(
+		ctx, logger, archives, clients, pollInterval, minArchives, timeout)
+	if err != nil {
+		return err
+	}
+	defer em.Close()
+	return em.WaitForEnrollment()
 }
 
 func main() {
@@ -251,16 +334,31 @@ func main() {
 		}
 	}
 
+	// peerIDToHostname covers every node so log messages can name a client
+	// that shows up as a caller. clientCredsPerCaller is also built from the
+	// full set so a non-archive caller (e.g. client-1 dialing the archive
+	// gRPC pool through the proxy) has matching credentials to forward.
+	peerIDToHostname := make(map[peer.ID]string, len(nodeInfos))
+	for i, n := range nodeInfos {
+		peerIDToHostname[nodeIdents[i].PeerID] = n.Hostname
+	}
+
 	var grpcProxy *proxygrpc.GRPCProxy
 	if len(nodeInfos) > 0 {
 		const grpcBasePort = 9000
 
 		backends := make([]proxygrpc.BackendEntry, 0, len(nodeInfos))
-		peerIDToHostname := make(map[peer.ID]string, len(nodeInfos))
 
 		for i, n := range nodeInfos {
+			// Only archives serve inter-node gRPC; clients are dial-only.
+			// Build a backend listener for each archive, but include every
+			// node (archive or client) as a potential caller below so the
+			// proxy can forward TLS credentials matching the caller.
+			if !n.IsArchive {
+				continue
+			}
+
 			backend := nodeIdents[i]
-			peerIDToHostname[backend.PeerID] = n.Hostname
 
 			// Server-side: impersonate the backend node using its private key.
 			serverCreds, err := backend.Auth.CreateServerTLSCredentials()
@@ -269,8 +367,9 @@ func main() {
 					zap.String("name", n.Name), zap.Error(err))
 			}
 
-			// Client-side: for each potential caller, create credentials that
-			// carry the caller's identity when connecting to this backend.
+			// Client-side: for each potential caller (archive or client),
+			// create credentials that carry the caller's identity when
+			// connecting to this backend.
 			clientCredsPerCaller := make(map[peer.ID]credentials.TransportCredentials, len(nodeIdents))
 			for _, caller := range nodeIdents {
 				creds, err := caller.Auth.CreateClientTLSCredentials([]byte(backend.PeerID))
@@ -340,20 +439,33 @@ func main() {
 
 	logger.Info("Stop conditions", zap.Uint64("stop_frame", stopFrame), zap.Int("min_nodes", minNodes))
 
-	// Build frame monitor targets with TLS credentials for each node.
-	targets := make([]testing.NodeTarget, len(nodeInfos))
-	for i, n := range nodeInfos {
+	// Build frame monitor targets with TLS credentials for each archive.
+	// Clients run the same binary so they advance frames too, but their height
+	// isn't an independent signal — including them would let a stuck client
+	// mask a stuck archive.
+	targets := make([]testing.NodeTarget, 0, len(nodeInfos))
+	archiveCount := 0
+	clientCount := 0
+	for _, n := range nodeInfos {
+		if !n.IsArchive {
+			clientCount++
+			continue
+		}
+		archiveCount++
 		pid, _ := peer.Decode(n.PeerID) // already validated above
 		creds, err := proxyAuth.CreateClientTLSCredentials([]byte(pid))
 		if err != nil {
 			logger.Fatal("failed to create frame monitor TLS credentials",
 				zap.String("name", n.Name), zap.Error(err))
 		}
-		targets[i] = testing.NodeTarget{
+		targets = append(targets, testing.NodeTarget{
 			Address:  n.StreamAddress(),
 			DialOpts: []grpc.DialOption{grpc.WithTransportCredentials(creds)},
-		}
+		})
 	}
+	logger.Info("node families",
+		zap.Int("archives", archiveCount),
+		zap.Int("clients", clientCount))
 
 	frameMonitor, err := testing.NewFrameMonitor(
 		ctx,
@@ -420,7 +532,9 @@ func main() {
 					}
 					senders[senderKey] = struct{}{}
 					count := len(senders)
-					n := len(nodeInfos)
+					// Only archives participate in global consensus, so the
+					// "all nodes timed out" signal is archives-only.
+					n := archiveCount
 					allNodesTimedOut := count >= n
 					if allNodesTimedOut {
 						logger.Info("advancing rank due to timeout condition",
@@ -447,9 +561,16 @@ func main() {
 
 					committedFrames := frameMonitor.FetchCommittedFrames()
 
+					// Enrollment verification: query each archive's
+					// NodeService.GetVertexData for each client's prover
+					// vertex; require minNodes archives to confirm. No-op
+					// when there are no client (non-archive) nodes.
+					enrollmentErr := runEnrollmentMonitor(
+						ctx, logger, nodeInfos, minNodes, pollInterval, nodeCatchupTimeout)
+
 					err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
 						stopFrame, shared.NotificationTypeTerminalFrame, committedFrames,
-						nodesReachedStopFrame, totalNodes)
+						nodesReachedStopFrame, totalNodes, enrollmentErr)
 
 					cancel(err)
 					return
@@ -460,7 +581,7 @@ func main() {
 					zap.Uint64("stop_frame", stopFrame))
 				err := notifyRunner(logger, runnerAddress, runnerAuthToken, runID,
 					stopFrame, shared.NotificationTypeGlobalTimeout, nil,
-					0, len(nodeInfos))
+					0, archiveCount, nil)
 				cancel(err)
 				return
 			}

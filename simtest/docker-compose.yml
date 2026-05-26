@@ -29,6 +29,9 @@ networks:
   archive-4-network:
     driver: bridge
     internal: true
+  client-1-network:
+    driver: bridge
+    internal: true
 
 services:
   # Bootstrap node - starts first and provides initial peer discovery
@@ -50,12 +53,14 @@ services:
       - NODE_INFOS=${NODE_INFOS}
       - MIN_NODES=${MIN_NODES}
       - RANK_PARTITIONS=${RANK_PARTITIONS}
+      - GLOBAL_TIMEOUT=${GLOBAL_TIMEOUT}
     networks:
       - proxy-network
       - archive-1-network
       - archive-2-network
       - archive-3-network
       - archive-4-network
+      - client-1-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -178,6 +183,51 @@ services:
        - ./config/archive-4-config:/root/config
     healthcheck:
       test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmRTd8oGd75wjYhoVxkffpzmmCm9MF6oqYpoXNL7n3rjGk"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  # Non-archive (client) nodes
+  # Same binary as the archives, with engine.archiveMode=false. The Rust node's
+  # prover lifecycle automatically drives ProverJoin/ProverConfirm via the
+  # archive gRPC pool (routed through the proxy in simtest).
+  client-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    # Constrain to CPUs 0-2 (3 logical cores) so the rust node's
+    # `available_parallelism - 1` worker pre-allocation produces
+    # exactly 2 workers. The proxy's enrollment monitor asserts
+    # this expected core count.
+    cpuset: "0-2"
+    networks:
+      - client-1-network
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    depends_on:
+      proxy:
+        condition: service_healthy
+      archive-1:
+        condition: service_healthy
+      archive-2:
+        condition: service_healthy
+      archive-3:
+        condition: service_healthy
+      archive-4:
+        condition: service_healthy
+    volumes:
+       - ./config/client-1-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmeR2GE77KwyavM7RHn2C415wDxytvh3Q119v7JSSjK6KM"]
       interval: 30s
       timeout: 10s
       retries: 3

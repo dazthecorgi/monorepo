@@ -183,17 +183,39 @@ func prepareRun() (context.Context, context.CancelFunc, commonState, error) {
 		execDir = cwd
 	}
 
-	nodeInfos, err := getArchiveServices(ctx, execDir)
+	nodeInfos, err := getNodeServices(ctx, execDir)
 	if err != nil {
 		cancel()
-		return nil, nil, commonState{}, fmt.Errorf("failed to get archive services: %w", err)
+		return nil, nil, commonState{}, fmt.Errorf("failed to get node services: %w", err)
 	}
 
-	mn := len(nodeInfos)
+	archives := countArchives(nodeInfos)
+	clients := len(nodeInfos) - archives
+
+	// Default the success threshold to the number of archives: clients run the
+	// same binary so they advance frames too, but their height shouldn't gate
+	// the test (a stuck client poller would mask a stuck archive). Frame
+	// liveness is an archive-only signal.
+	mn := archives
 	if minNodes > 0 {
 		mn = minNodes
 	}
+	logger.Infow("Discovered nodes",
+		"archives", archives,
+		"clients", clients,
+		"minimum_nodes_for_success", mn)
 	return ctx, cancel, commonState{execDir: execDir, nodeInfos: nodeInfos, minimumNodes: mn}, nil
+}
+
+// countArchives returns the number of archive nodes in the given slice.
+func countArchives(nodes []shared.NodeInfo) int {
+	n := 0
+	for _, info := range nodes {
+		if info.IsArchive {
+			n++
+		}
+	}
+	return n
 }
 
 // finishRun prints the summary and exits with the appropriate code.
@@ -397,7 +419,7 @@ func main() {
 		Short: "Run a single simulation",
 		RunE:  runSingleCmd,
 	}
-	singleCmd.Flags().IntVar(&stopFrame, "stopframe", 10, "frame number at which the simulation should stop")
+	singleCmd.Flags().IntVar(&stopFrame, "stopframe", 30, "frame number at which the simulation should stop (needs to comfortably exceed bootstrap_frames + TESTNET_CONFIRM_WINDOW_FRAMES so a client prover-join → prover-confirm cycle fits inside the run)")
 	singleCmd.Flags().IntVar(&minNodes, "minnodes", 0, "minimum number of nodes that must reach the stop frame (0 = all nodes)")
 	singleCmd.Flags().StringVar(&rankPartitions, "rank-partitions", "",
 		`JSON array of per-rank partition configs, e.g. '[{"rank":5,"partition1":["archive-1"],"partition2":["archive-3"]}]'`)
