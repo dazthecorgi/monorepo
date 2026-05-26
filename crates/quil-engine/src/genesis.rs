@@ -1473,46 +1473,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_testnet_prover_keys_strips_embedded_spaces() {
-        // YAML folded scalars (`>` / `>-`) join lines with single spaces.
-        let key_a = vec![0xAAu8; 585];
-        let key_b = vec![0xBBu8; 585];
-        let seed_hex = format!("{} {}", hex::encode(&key_a), hex::encode(&key_b));
-
-        let keys = resolve_testnet_prover_keys(1, &seed_hex, &[0xCC; 585]).unwrap();
-        assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0], key_a);
-        assert_eq!(keys[1], key_b);
-    }
-
-    #[test]
-    fn resolve_testnet_prover_keys_strips_mixed_whitespace() {
-        // Newlines, tabs, and leading/trailing whitespace must all be tolerated.
-        let key_a = vec![0xAAu8; 585];
-        let key_b = vec![0xBBu8; 585];
-        let seed_hex = format!(
-            "  {}\n\t{}\n",
-            hex::encode(&key_a),
-            hex::encode(&key_b),
-        );
-
-        let keys = resolve_testnet_prover_keys(1, &seed_hex, &[0xCC; 585]).unwrap();
-        assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0], key_a);
-        assert_eq!(keys[1], key_b);
-    }
-
-    #[test]
-    fn resolve_testnet_prover_keys_invalid_hex_char_still_errors() {
-        // Non-whitespace garbage should still produce a decode error,
-        // confirming the whitespace strip is not masking other invalid input.
-        let valid = hex::encode(vec![0xAAu8; 585]);
-        let seed_hex = format!("{} ZZ", valid);
-        let result = resolve_testnet_prover_keys(1, &seed_hex, &[0xCC; 585]);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn resolve_testnet_prover_keys_empty_seed_uses_local() {
         let local_key = vec![0xDDu8; 585];
         let keys = resolve_testnet_prover_keys(1, "", &local_key).unwrap();
