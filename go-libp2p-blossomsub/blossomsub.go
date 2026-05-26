@@ -1372,6 +1372,9 @@ func (bs *BlossomSubRouter) Publish(msg *Message) {
 
 	out := rpcWithMessages(msg.Message)
 	for pid := range toSend {
+		if !bs.p.forwardFilter(from, pid) {
+			continue
+		}
 		bs.sendRPC(pid, out, false)
 	}
 }

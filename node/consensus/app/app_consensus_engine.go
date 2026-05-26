@@ -2609,7 +2609,8 @@ func (e *AppConsensusEngine) startConsensus(
 		e.voteAggregator,    // voteAggregator
 		e.timeoutAggregator, // timeoutAggregator
 		e,                   // finalizer
-		e.appAddress,        // filter
+		e.appAddress,                      // filter
+		e.config.Engine.AppFrameInterval,   // frameInterval
 		trustedRoot,
 		pending,
 	)

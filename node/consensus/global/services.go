@@ -43,15 +43,17 @@ func (e *GlobalConsensusEngine) GetGlobalFrame(
 	ctx context.Context,
 	request *protobufs.GetGlobalFrameRequest,
 ) (*protobufs.GlobalFrameResponse, error) {
-	peerID, ok := qgrpc.PeerIDFromContext(ctx)
-	if !ok {
-		return nil, status.Error(codes.Internal, "remote peer ID not found")
-	}
+	// TODO uncomment
+	// peerID, ok := qgrpc.PeerIDFromContext(ctx)
+	// if !ok {
+	// 	return nil, status.Error(codes.Internal, "remote peer ID not found")
+	// }
 
 	e.logger.Debug(
 		"received frame request",
 		zap.Uint64("frame_number", request.FrameNumber),
-		zap.String("peer_id", peerID.String()),
+		// TODO uncomment
+		// zap.String("peer_id", peerID.String()),
 	)
 	var frame *protobufs.GlobalFrame
 	var err error
@@ -76,7 +78,7 @@ func (e *GlobalConsensusEngine) GetGlobalFrame(
 	if err != nil {
 		e.logger.Debug(
 			"received error while fetching time reel head",
-			zap.String("peer_id", peerID.String()),
+			// TODO uncomment
 			zap.Uint64("frame_number", request.FrameNumber),
 			zap.Error(err),
 		)

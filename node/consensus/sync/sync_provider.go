@@ -58,10 +58,11 @@ type SyncProvider[StateT UniqueFrame, ProposalT any] struct {
 	hypergraph           hypergraph.Hypergraph
 	config               *config.Config
 
-	filter        []byte
-	proverAddress []byte
-	filterLabel   string
-	hooks         SyncProviderHooks[StateT, ProposalT]
+	filter               []byte
+	proverAddress        []byte
+	filterLabel          string
+	hooks                SyncProviderHooks[StateT, ProposalT]
+	periodicSyncInterval time.Duration
 }
 
 var _ consensus.SyncProvider[*protobufs.GlobalFrame] = (*SyncProvider[*protobufs.GlobalFrame, *protobufs.GlobalProposal])(nil)
@@ -104,6 +105,7 @@ func NewSyncProvider[StateT UniqueFrame, ProposalT any](
 		queuedStates:         make(chan syncRequest, defaultStateQueueCapacity),
 		filterLabel:          label,
 		hooks:                hooks,
+		periodicSyncInterval: config.Engine.PeriodicSyncInterval,
 	}
 }
 
@@ -134,7 +136,11 @@ func (p *SyncProvider[StateT, ProposalT]) Start(
 				request.peerId,
 				request.identity,
 			)
-		case <-time.After(10 * time.Minute):
+		case <-time.After(p.periodicSyncInterval):
+			p.logger.Debug(
+				"periodic sync timer fired",
+				zap.Uint64("current_frame", (*p.forks.FinalizedState().State).GetFrameNumber()),
+			)
 			peerId, err := p.getRandomProverPeerId()
 			if err != nil {
 				p.logger.Debug("could not get random prover peer id", zap.Error(err))
@@ -679,6 +685,16 @@ func (p *SyncProvider[StateT, ProposalT]) getDirectChannel(
 	*grpc.ClientConn,
 	error,
 ) {
+	ma, err := multiaddr.StringCast(multiaddrString)
+	if err != nil {
+		return nil, err
+	}
+
+	mga, err := mn.ToNetAddr(ma)
+	if err != nil {
+		return nil, err
+	}
+
 	creds, err := p2p.NewPeerAuthenticator(
 		p.logger,
 		p.config.P2P,
@@ -693,20 +709,11 @@ func (p *SyncProvider[StateT, ProposalT]) getDirectChannel(
 	if err != nil {
 		return nil, err
 	}
-
-	ma, err := multiaddr.StringCast(multiaddrString)
-	if err != nil {
-		return nil, err
-	}
-
-	mga, err := mn.ToNetAddr(ma)
-	if err != nil {
-		return nil, err
-	}
+	dialOpt := grpc.WithTransportCredentials(creds)
 
 	cc, err := grpc.NewClient(
 		mga.String(),
-		grpc.WithTransportCredentials(creds),
+		dialOpt,
 	)
 	return cc, err
 }

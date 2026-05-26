@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"regexp"
 	"slices"
 	"time"
 
@@ -618,7 +619,11 @@ func (e *GlobalConsensusEngine) establishTestnetGenesisProvers() error {
 	var err error
 	if e.config.P2P.Network != 99 && e.config.Engine != nil &&
 		e.config.Engine.GenesisSeed != "" {
-		proverPubKeyBytes, err := hex.DecodeString(e.config.Engine.GenesisSeed)
+		// Remove all whitespace characters
+		wsRegex := regexp.MustCompile(`\s+`)
+		cleanedSeed := wsRegex.ReplaceAllString(e.config.Engine.GenesisSeed, "")
+		
+		proverPubKeyBytes, err := hex.DecodeString(cleanedSeed)
 		if err != nil {
 			panic(err)
 		}

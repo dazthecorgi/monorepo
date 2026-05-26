@@ -14,6 +14,9 @@ const (
 	defaultSyncMessageReceiveLimit            = 600 * 1024 * 1024
 	defaultSyncMessageSendLimit               = 600 * 1024 * 1024
 	defaultRewardStrategy                     = "reward-greedy"
+	defaultPeriodicSyncInterval               = 10 * time.Minute
+	defaultGlobalFrameInterval                = 8 * time.Second
+	defaultAppFrameInterval                   = 8 * time.Second
 )
 
 type FramePublishFragmentationReedSolomonConfig struct {
@@ -154,6 +157,12 @@ type EngineConfig struct {
 
 	// EXPERIMENTAL: The configuration for frame publishing.
 	FramePublish FramePublishConfig `yaml:"framePublish"`
+	// Interval between periodic sync timer ticks. Defaults to 10 minutes.
+	PeriodicSyncInterval time.Duration `yaml:"periodicSyncInterval"`
+	// Interval between global consensus frame proposals. Defaults to 8 seconds.
+	GlobalFrameInterval time.Duration `yaml:"globalFrameInterval"`
+	// Interval between app shard consensus frame proposals. Defaults to 8 seconds.
+	AppFrameInterval time.Duration `yaml:"appFrameInterval"`
 }
 
 // WithDefaults returns a copy of the EngineConfig with any missing fields set
@@ -190,6 +199,15 @@ func (c EngineConfig) WithDefaults() EngineConfig {
 		defaultSyncMessageSendLimit,
 	)
 	cpy.FramePublish = cpy.FramePublish.WithDefaults()
+	if cpy.PeriodicSyncInterval == 0 {
+		cpy.PeriodicSyncInterval = defaultPeriodicSyncInterval
+	}
+	if cpy.GlobalFrameInterval == 0 {
+		cpy.GlobalFrameInterval = defaultGlobalFrameInterval
+	}
+	if cpy.AppFrameInterval == 0 {
+		cpy.AppFrameInterval = defaultAppFrameInterval
+	}
 	if cpy.Blacklist == nil {
 		cpy.Blacklist = []string{}
 	}

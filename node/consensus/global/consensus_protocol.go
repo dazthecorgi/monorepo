@@ -308,8 +308,9 @@ func (cp *ConsensusProtocol) startConsensus(
 		validator.NewValidator[*protobufs.GlobalFrame](cp, cp), // validator
 		cp.voteAggregator,    // voteAggregator
 		cp.timeoutAggregator, // timeoutAggregator
-		cp,                   // finalizer
-		nil,                  // filter
+		cp,                                    // finalizer
+		nil,                                   // filter
+		cp.engine.config.Engine.GlobalFrameInterval, // frameInterval
 		trustedRoot,
 		pending,
 	)
@@ -343,6 +344,7 @@ func (cp *ConsensusProtocol) OnCurrentRankDetails(
 	cp.engine.logger.Info(
 		"entered new rank",
 		zap.Uint64("current_rank", currentRank),
+		zap.Uint64("finalized_rank", finalizedRank),
 		zap.String("current_leader", hex.EncodeToString([]byte(currentLeader))),
 	)
 }
@@ -688,7 +690,8 @@ func (cp *ConsensusProtocol) OnQuorumCertificateTriggeredRankChange(
 	}
 
 	if !bytes.Equal(frame.Header.ParentSelector, parentQC.Selector) {
-		cp.engine.logger.Error(
+		// If we get a new QC, but haven't synced yet, it's expected that that the last QC we have doesn't match the frame parent.
+		cp.engine.logger.Debug(
 			"quorum certificate does not match frame parent",
 			zap.String(
 				"frame_parent_selector",
