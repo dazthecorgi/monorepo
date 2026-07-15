@@ -29,6 +29,8 @@ pub mod addressed_signature;
 pub mod alt_shard_update_materialize;
 pub mod consensus_types;
 pub mod conversions;
+#[cfg(test)]
+mod finding_repros;
 pub mod frame_header;
 pub mod intrinsic;
 pub mod kick_verify;
