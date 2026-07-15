@@ -1,0 +1,14 @@
+# Cached TLA+ tools (check.sh downloads and sha256-verifies tla2tools.jar)
+.tools/
+
+# TLC working state (fingerprint sets, checkpoints)
+states/
+models/states/
+
+# TLC counterexample-trace artifacts (regenerate with ./check.sh)
+*_TTrace_*
+.tlacache/
+
+# Findings-run output: generated config + per-property counterexample logs
+models/MC_Findings.cfg
+*.out
