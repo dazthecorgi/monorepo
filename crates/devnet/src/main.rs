@@ -1,17 +1,21 @@
 //! `devnet` — Docker-based integration-test runner for the Quilibrium network.
 //!
 //! Discovers the node services in `docker-compose.yml`, builds the stack, and
-//! runs a partition scenario from a manual schedule (`single` mode),
-//! adjudicating the run from the proxy's notification.
+//! runs partition scenarios (one manual schedule in `single` mode, or every
+//! symmetry-unique schedule in `exhaustive` mode), adjudicating each run from
+//! the proxy's notification.
 
 mod artifacts;
 mod docker;
+mod exhaustive;
 mod notification;
 mod registry;
 mod runner;
 mod util;
 
+use std::collections::{HashMap, HashSet};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -22,6 +26,9 @@ use tracing_subscriber::EnvFilter;
 use devnet::rankpartitions::{self, RankPartitionEntry};
 use devnet::shared::NodeInfo;
 
+use crate::exhaustive::{
+    create_progress_file, read_progress_file, run_exhaustive, ExhaustiveConfig,
+};
 use crate::notification::{start_notification_server, NotificationRouter};
 use crate::registry::ProjectRegistry;
 use crate::runner::{has_failures, print_summary, run_single_test, RunConfig, TestResult};
@@ -74,6 +81,24 @@ enum Command {
         /// '[{"rank":5,"partition1":["archive-1"],"partition2":["archive-3"]}]'.
         #[arg(long = "rank-partitions", default_value = "")]
         rank_partitions: String,
+    },
+    /// Run every symmetry-unique rank partition schedule.
+    Exhaustive {
+        /// Number of schedules to run in parallel.
+        #[arg(long, default_value_t = 1)]
+        parallel: i32,
+        /// Max rank for schedule generation; required for multi-node setups.
+        #[arg(long = "partition-stop-rank", default_value_t = 0)]
+        partition_stop_rank: u64,
+        /// RNG seed for shuffling schedules (0 = time-based); the actual seed is always logged.
+        #[arg(long, default_value_t = 0)]
+        seed: i64,
+        /// Path to a progress file; enables resumption of interrupted runs.
+        #[arg(long = "progress-file", default_value = "")]
+        progress_file: String,
+        /// Cancel remaining jobs after the first failure.
+        #[arg(long = "fail-fast")]
+        fail_fast: bool,
     },
 }
 
@@ -130,16 +155,39 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         node_catchup_timeout: Duration::from_secs(node_catchup_timeout.parse()?),
     };
 
-    let Command::Single {
-        stop_frame,
-        min_nodes,
-        rank_partitions,
-    } = command;
+    let min_nodes_override = match &command {
+        Command::Single { min_nodes, .. } => *min_nodes,
+        Command::Exhaustive { .. } => 0,
+    };
 
-    let (cancel, state) = prepare_run(&opts.working_dir, min_nodes).await?;
+    let (cancel, state) = prepare_run(&opts.working_dir, min_nodes_override).await?;
 
-    let (results, interrupted) =
-        run_single_mode(&opts, &cancel, state, stop_frame, &rank_partitions).await?;
+    let (results, interrupted) = match command {
+        Command::Single {
+            stop_frame,
+            rank_partitions,
+            ..
+        } => run_single_mode(&opts, &cancel, state, stop_frame, &rank_partitions).await?,
+        Command::Exhaustive {
+            parallel,
+            partition_stop_rank,
+            seed,
+            progress_file,
+            fail_fast,
+        } => {
+            run_exhaustive_mode(
+                &opts,
+                &cancel,
+                state,
+                parallel,
+                partition_stop_rank,
+                seed,
+                &progress_file,
+                fail_fast,
+            )
+            .await?
+        }
+    };
 
     Ok(finish_run(&results, interrupted))
 }
@@ -249,6 +297,128 @@ async fn run_single_mode(
     }
 
     Ok((vec![result], interrupted))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_exhaustive_mode(
+    opts: &Opts,
+    cancel: &CancellationToken,
+    state: CommonState,
+    parallel: i32,
+    partition_stop_rank: u64,
+    seed_flag: i64,
+    progress_file: &str,
+    fail_fast: bool,
+) -> Result<(Vec<TestResult>, bool)> {
+    let node_names: Vec<String> = state.node_infos.iter().map(|n| n.name.clone()).collect();
+    let archives: HashSet<String> = state
+        .node_infos
+        .iter()
+        .filter(|n| n.is_archive)
+        .map(|n| n.name.clone())
+        .collect();
+    let node_info_map: HashMap<String, NodeInfo> = state
+        .node_infos
+        .iter()
+        .map(|n| (n.name.clone(), n.clone()))
+        .collect();
+
+    // Consult the progress file before generating anything: a resume must reuse
+    // the persisted schedules and seed, so regenerating the (exponential)
+    // schedule set would be wasted work, and the persisted seed — not a freshly
+    // chosen one — is what actually describes the run's execution order.
+    let progress = match read_progress_file(progress_file, &node_names, partition_stop_rank)
+        .context("failed to read progress file")?
+    {
+        Some(state) => {
+            if seed_flag != 0 && seed_flag != state.seed {
+                tracing::warn!(
+                    requested = seed_flag,
+                    using = state.seed,
+                    "ignoring --seed: resuming with the seed and schedule order from the progress file"
+                );
+            }
+            tracing::info!(
+                seed = state.seed,
+                total_schedules = state.schedules.len(),
+                "Exhaustive mode (resuming)"
+            );
+            state
+        }
+        None => {
+            let mut schedules = rankpartitions::all_rank_partitions_unique(
+                &node_names,
+                &archives,
+                partition_stop_rank,
+            );
+            let seed = if seed_flag == 0 {
+                time_seed()
+            } else {
+                seed_flag
+            };
+            shuffle_schedules(&mut schedules, seed);
+            tracing::info!(seed, total_schedules = schedules.len(), "Exhaustive mode");
+            create_progress_file(
+                progress_file,
+                seed,
+                &node_names,
+                partition_stop_rank,
+                schedules,
+            )
+            .context("failed to create progress file")?
+        }
+    };
+    tracing::info!(
+        already_completed = progress.completed.len(),
+        total = progress.schedules.len(),
+        "Progress"
+    );
+
+    docker::docker_compose_build(&state.exec_dir, opts.verbose)
+        .await
+        .context("failed to build docker compose")?;
+
+    let bearer_token = generate_bearer_token();
+    let router = NotificationRouter::new();
+    let server = start_notification_server(&opts.listen_port, bearer_token.clone(), router.clone())
+        .await
+        .context("failed to start notification server")?;
+    let registry = ProjectRegistry::new();
+
+    let base_run = RunConfig {
+        exec_dir: state.exec_dir.clone(),
+        bearer_token,
+        listen_port: opts.listen_port.clone(),
+        verbose: opts.verbose,
+        // Exhaustive runs to one frame past the last partitioned rank.
+        stop_frame: partition_stop_rank as i32 + 1,
+        nodes: state.node_infos.clone(),
+        minimum_nodes: state.minimum_nodes,
+        rank_partitions_resolved: String::new(),
+        rank_partitions_original: Vec::new(),
+        out_dir: opts.out_dir.clone(),
+        save_logs_on_success: opts.save_logs_on_success,
+        parallel,
+        global_timeout: opts.global_timeout,
+        node_catchup_timeout: opts.node_catchup_timeout,
+    };
+
+    let excfg = ExhaustiveConfig {
+        run: base_run,
+        node_info_map,
+        fail_fast,
+        progress_path: progress_file.to_string(),
+        progress: Arc::new(Mutex::new(progress)),
+    };
+
+    let (results, interrupted) = run_exhaustive(cancel, excfg, &router, &registry).await;
+
+    server.shutdown().await;
+    if interrupted {
+        cleanup_active_projects(&state.exec_dir, &registry, opts.verbose, parallel).await;
+    }
+
+    Ok((results, interrupted))
 }
 
 /// Parses the raw JSON rank-partitions flag and resolves node names to peer IDs.
@@ -394,6 +564,22 @@ fn spawn_signal_handler(cancel: CancellationToken) {
         }
         cancel.cancel();
     });
+}
+
+/// Time-based seed (nanoseconds since the Unix epoch) for shuffle determinism
+/// logging. Mirrors Go's `time.Now().UnixNano()`.
+fn time_seed() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+fn shuffle_schedules(schedules: &mut [Vec<RankPartitionEntry>], seed: i64) {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+    schedules.shuffle(&mut rng);
 }
 
 #[cfg(test)]

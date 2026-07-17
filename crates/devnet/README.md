@@ -21,6 +21,9 @@ logs from each node are saved to disk.
 cargo run -p devnet -- single --verbose --stopframe=5 \
   --rank-partitions='[{"rank":1 ,"partition1":["archive-1","archive-2","archive-3"],"partition2":["archive-4"]}]'
 
+# every symmetry-unique schedule up to rank 2, 2 at a time, resumable
+cargo run -p devnet -- exhaustive --partition-stop-rank=2 --parallel=2 \
+  --progress-file=/tmp/devnet-progress.json
 ```
 
 Run `cargo run -p devnet -- --help` (and `single --help` / `exhaustive --help`)

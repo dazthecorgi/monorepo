@@ -21,6 +21,10 @@ pub struct TestResult {
     pub error_message: String,
     pub duration: Duration,
     pub artifact_dir: String,
+    /// True when the run was cut short by cancellation (signal or fail-fast)
+    /// rather than reaching a verdict. Such a result must not be persisted as a
+    /// completed schedule in exhaustive mode — the run never actually finished.
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +140,7 @@ pub async fn run_single_test(
                     run_id: run_id.to_string(),
                     success: false,
                     error_message: "test run cancelled".to_string(),
+                    cancelled: true,
                     ..Default::default()
                 };
             }
