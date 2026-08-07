@@ -28,3 +28,9 @@ uuid = { version = "1", features = ["v4"] }
 subtle = "2"
 anyhow = "1"
 thiserror = "2"
+
+[dev-dependencies]
+# Test-only: pins the client fixtures' dataWorkerFilters against the devnet
+# token app domain (`genesis::devnet_token_domain`). Kept out of [dependencies]
+# so the host binary doesn't pull the engine's heavy graph.
+quil-engine = { path = "../quil-engine" }

@@ -54,6 +54,14 @@ pub struct NodeInfo {
     /// prover registration landed in the archives' registry. Pre-computed at
     /// startup so the proxy doesn't need a Poseidon dependency.
     pub prover_address: String,
+    /// Hex-encoded app-shard consensus filters from the node's
+    /// `engine.dataWorkerFilters` (empty for archives). The proxy derives the
+    /// app-shard poll set, the per-client `RequestJoin` filter list, and the
+    /// enrollment monitor's expected worker count from this — the client
+    /// configs are the single source of truth. `#[serde(default)]` keeps old
+    /// NODE_INFOS payloads decodable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_filters: Vec<String>,
 }
 
 impl NodeInfo {
@@ -103,6 +111,47 @@ pub struct FrameNotification {
     /// run is not evidence of anything and its other results cannot be trusted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub harness_error: String,
+    /// Set when app-shard verification failed: the tracked shard never reached
+    /// `app_stop_frame`, an equivocation was observed, or the tracker could not
+    /// classify traffic. Empty when app-shard checking is disabled or passed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_shard_error: String,
+    /// Number of pinned app-shard filters whose observed frame number reached
+    /// `app_stop_frame`. 0 when app-shard checking is disabled.
+    #[serde(default)]
+    pub app_shards_reached: i32,
+    /// Total number of pinned app-shard filters under observation. 0 when
+    /// app-shard checking is disabled.
+    #[serde(default)]
+    pub app_shards_total: i32,
+    /// The configured app-shard stop frame (0 = app-shard checking disabled).
+    #[serde(default)]
+    pub app_stop_frame: u64,
+    /// Number of client nodes whose polled app-shard head reached
+    /// `app_stop_frame` — the app analogue of `nodes_reached_stop_frame`,
+    /// measured out-of-band over each client's `AppShardService`.
+    #[serde(default)]
+    pub app_nodes_reached: i32,
+    /// Total client nodes polled for app-shard convergence. 0 when app-shard
+    /// checking is disabled (and on bodies from proxies predating the field).
+    #[serde(default)]
+    pub app_total_nodes: i32,
+    /// Set when the app shard violated safety: the polled chain
+    /// `1..=app_stop_frame` is not a single linear chain, or two frames with
+    /// the same number carried different outputs on gossip (equivocation).
+    /// The app analogue of `safety_error`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_safety_error: String,
+    /// Set when one or more committee clients never originated a shard
+    /// consensus vote at or after the app stop frame's view — i.e. they
+    /// passively ingested frames without participating. The app analogue of
+    /// `rejoin_error`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_participation_error: String,
+    /// On `Progress` notifications, the app shard's current head frame
+    /// (0 when app-shard checking is disabled or no frame was observed yet).
+    #[serde(default)]
+    pub app_frame_number: u64,
 }
 
 #[cfg(test)]
@@ -121,6 +170,7 @@ mod tests {
             falcon_signing_key: "c0ffee".into(),
             is_archive: true,
             prover_address: String::new(),
+            pinned_filters: Vec::new(),
         };
         let v: serde_json::Value = serde_json::to_value(&n).unwrap();
         // Exact wire keys consumed by the proxy.
@@ -154,6 +204,77 @@ mod tests {
         assert_eq!(n.notification_type, NotificationType::TerminalFrame);
         assert_eq!(n.nodes_reached_stop_frame, 3);
         assert!(n.safety_error.is_empty());
+        // Bodies from a proxy predating the app-shard fields still decode,
+        // with app checking reported as disabled.
+        assert!(n.app_shard_error.is_empty());
+        assert_eq!(n.app_shards_reached, 0);
+        assert_eq!(n.app_shards_total, 0);
+        assert_eq!(n.app_stop_frame, 0);
+        assert_eq!(n.app_nodes_reached, 0);
+        assert_eq!(n.app_total_nodes, 0);
+        assert!(n.app_safety_error.is_empty());
+        assert!(n.app_participation_error.is_empty());
+        assert_eq!(n.app_frame_number, 0);
+    }
+
+    #[test]
+    fn frame_notification_app_shard_fields_roundtrip() {
+        let n = FrameNotification {
+            run_id: "r1".into(),
+            stop_frame: 30,
+            notification_type: NotificationType::TerminalFrame,
+            safety_error: String::new(),
+            nodes_reached_stop_frame: 4,
+            total_nodes: 4,
+            enrollment_error: String::new(),
+            rejoin_error: String::new(),
+            harness_error: String::new(),
+            app_shard_error: "shard 17685a…8643 at frame 1 < 3".into(),
+            app_shards_reached: 0,
+            app_shards_total: 1,
+            app_stop_frame: 3,
+            app_nodes_reached: 2,
+            app_total_nodes: 4,
+            app_safety_error: "app shard fork: frame 2 has two outputs".into(),
+            app_participation_error: "client-3 did not vote".into(),
+            app_frame_number: 0,
+        };
+        let v: serde_json::Value = serde_json::to_value(&n).unwrap();
+        assert_eq!(v.get("app_shards_total").unwrap(), 1);
+        assert_eq!(v.get("app_stop_frame").unwrap(), 3);
+        assert_eq!(v.get("app_nodes_reached").unwrap(), 2);
+        assert_eq!(v.get("app_total_nodes").unwrap(), 4);
+        let back: FrameNotification = serde_json::from_value(v).unwrap();
+        assert_eq!(back.app_shard_error, n.app_shard_error);
+        assert_eq!(back.app_shards_reached, 0);
+        assert_eq!(back.app_shards_total, 1);
+        assert_eq!(back.app_stop_frame, 3);
+        assert_eq!(back.app_nodes_reached, 2);
+        assert_eq!(back.app_total_nodes, 4);
+        assert_eq!(back.app_safety_error, n.app_safety_error);
+        assert_eq!(back.app_participation_error, n.app_participation_error);
+    }
+
+    #[test]
+    fn node_info_pinned_filters_default_and_roundtrip() {
+        // Old payload without the key decodes to empty.
+        let old = r#"{
+            "name": "client-1", "hostname": "client-1", "stream_port": 8340,
+            "node_port": 8337, "peer_id": "", "peer_priv_key": "",
+            "is_archive": false, "prover_address": ""
+        }"#;
+        let n: NodeInfo = serde_json::from_str(old).unwrap();
+        assert!(n.pinned_filters.is_empty());
+
+        let with = NodeInfo {
+            pinned_filters: vec![
+                "17685a7f980797b781da4120062d2c167a51fabadc745302b4972328f9718643".into(),
+            ],
+            ..n
+        };
+        let v: serde_json::Value = serde_json::to_value(&with).unwrap();
+        let back: NodeInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(back.pinned_filters, with.pinned_filters);
     }
 
     #[test]
@@ -168,13 +289,25 @@ mod tests {
             enrollment_error: String::new(),
             rejoin_error: String::new(),
             harness_error: String::new(),
+            app_shard_error: String::new(),
+            app_shards_reached: 0,
+            app_shards_total: 0,
+            app_stop_frame: 3,
+            app_nodes_reached: 0,
+            app_total_nodes: 0,
+            app_safety_error: String::new(),
+            app_participation_error: String::new(),
+            app_frame_number: 2,
         };
         let v: serde_json::Value = serde_json::to_value(&n).unwrap();
         assert_eq!(v.get("type").unwrap(), "frame_progress");
         assert_eq!(v.get("frame_number").unwrap(), 3);
+        assert_eq!(v.get("app_frame_number").unwrap(), 2);
         let back: FrameNotification = serde_json::from_value(v).unwrap();
         assert_eq!(back.notification_type, NotificationType::Progress);
         assert_eq!(back.stop_frame, 3);
+        assert_eq!(back.app_frame_number, 2);
+        assert_eq!(back.app_stop_frame, 3);
     }
 
     #[test]
@@ -189,6 +322,7 @@ mod tests {
             falcon_signing_key: String::new(),
             is_archive: true,
             prover_address: String::new(),
+            pinned_filters: Vec::new(),
         };
         assert_eq!(n.ordinal().unwrap(), 3);
     }

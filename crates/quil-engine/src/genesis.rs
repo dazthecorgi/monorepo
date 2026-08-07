@@ -926,6 +926,31 @@ pub fn seed_active_prover_on_filter(
 /// Default difficulty for testnet/devnet genesis when none is specified.
 const DEFAULT_TESTNET_DIFFICULTY: u32 = 10000;
 
+/// Fixed configuration of the devnet token app — a QUIL-functionality clone
+/// deployed at testnet genesis when `QUIL_SEED_APP_TOKEN` is set. Every field
+/// is constant: the deploy-derived domain (and therefore the genesis root) is
+/// a pure function of this config and must be identical on every node.
+pub fn devnet_token_config() -> quil_execution::token_intrinsic::config::TokenConfiguration {
+    use quil_execution::token_intrinsic::constants::{ACCEPTABLE, DIVISIBLE, EXPIRABLE};
+    quil_execution::token_intrinsic::config::TokenConfiguration {
+        behavior: (DIVISIBLE | ACCEPTABLE | EXPIRABLE) as u32,
+        name: b"Devnet Token".to_vec(),
+        symbol: b"DVT".to_vec(),
+        owner_public_key: vec![0x51u8; 32],
+        ..Default::default()
+    }
+}
+
+/// The devnet token app's domain — `poseidon("q_token" ‖ digest(config))` for
+/// the fixed `devnet_token_config()`. This is simultaneously the app address,
+/// the shard's consensus filter (single shard ⇒ empty prefix ⇒ bare 32 bytes),
+/// and the value devnet fixtures pin in `engine.dataWorkerFilters`. Pinned by
+/// `devnet_token_domain_is_pinned` so any drift in the derivation is loud.
+pub fn devnet_token_domain() -> [u8; 32] {
+    quil_execution::token_intrinsic::materialize::token_deploy_domain(&devnet_token_config())
+        .expect("devnet token domain derivation cannot fail for the fixed config")
+}
+
 /// Initialize genesis state for a testnet or devnet network.
 ///
 /// Unlike the mainnet path, this creates a fresh genesis at frame 0 with:
@@ -1030,6 +1055,43 @@ pub fn initialize_testnet_genesis_state(
         );
     }
 
+    // DEV-ONLY (gated): deploy the devnet token app — a QUIL-functionality
+    // clone at its own SINGLE-shard domain. Genesis-time equivalent of a
+    // `TokenDeploy` (runtime deploys are fork-gated below
+    // FRAME_2_1_GLOBAL_UNCOVERED_SHARD_TX and don't register shards): the
+    // metadata vertex routes the domain to the token engine (`select_engine`
+    // reads its type-domain), and the shards-store row written below (after
+    // the hypergraph commit) makes it joinable. The domain is a pure function
+    // of `devnet_token_config()`, so every node that sets the env derives the
+    // identical genesis root; a node that misses the env forks at genesis —
+    // set it on ALL nodes or none.
+    //
+    // Deliberately NO seed data: the shard starts empty, so proposed frames
+    // carry no storage attestation and followers skip that check
+    // (`frame_validator.rs` skips on an empty `storage_attestation_root`).
+    // With seeded data the proposer attests, and verification requires
+    // registered per-epoch leaf roots — which lag the frame's global anchor
+    // epoch for freshly-confirmed provers, so every proposal is rejected and
+    // the shard never advances (observed live in the devnet harness). Empty
+    // frames still advance the shard's frame number, which is what the devnet
+    // app-shard consensus check measures; devnet joins are driven explicitly
+    // (`RequestJoin`), so the zero-size auto-join invisibility doesn't matter.
+    let mut devnet_app_domain: Option<[u8; 32]> = None;
+    if std::env::var("QUIL_SEED_APP_TOKEN").is_ok() {
+        let cfg = devnet_token_config();
+        let domain = quil_execution::token_intrinsic::materialize::materialize_token_deploy_init(
+            &state,
+            &cfg,
+            0,
+            inclusion_prover,
+        )?;
+        tracing::warn!(
+            domain = %hex::encode(domain),
+            "QUIL_SEED_APP_TOKEN: deployed devnet token app (dev-only)"
+        );
+        devnet_app_domain = Some(domain);
+    }
+
     state.commit()?;
 
     // 5. Commit hypergraph and extract roots
@@ -1065,6 +1127,31 @@ pub fn initialize_testnet_genesis_state(
             &quil_types::store::ShardInfo {
                 shard_key: quil_shard_key.clone(),
                 prefix: vec![],
+                size: Vec::new(),
+                data_shards: 0,
+                commitment: Vec::new(),
+            },
+        )?;
+        txn.commit()?;
+    }
+
+    // ONE shards-store row for the devnet token app: `prefix: vec![]` ⇒ a
+    // single shard whose consensus filter is the bare 32-byte domain
+    // (filter = L2 ‖ prefix bytes). Mirrors the mainnet non-QUIL app branch
+    // in `initialize_genesis_state`. `normalize_quil_token_grid` only touches
+    // rows whose L2 == QUIL_TOKEN, so this row survives startup untouched.
+    if let Some(domain) = devnet_app_domain {
+        let l1 =
+            quil_hypergraph::addressing::get_bloom_filter_indices(&domain[..], 256, 3);
+        let mut shard_key = Vec::with_capacity(3 + domain.len());
+        shard_key.extend_from_slice(&l1);
+        shard_key.extend_from_slice(&domain[..]);
+        let txn = clock_store.new_transaction(false)?;
+        shards_store.put_app_shard(
+            txn.as_ref(),
+            &quil_types::store::ShardInfo {
+                shard_key,
+                prefix: Vec::new(),
                 size: Vec::new(),
                 data_shards: 0,
                 commitment: Vec::new(),
@@ -1291,6 +1378,61 @@ pub fn initialize_genesis(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the devnet token app's deploy-derived domain. Devnet fixtures
+    /// (`crates/devnet/config/client-*/config.yml` `dataWorkerFilters`) and
+    /// the devnet proxy hold this exact hex; if the derivation or the fixed
+    /// config ever changes, this test failing is the signal to re-cut them.
+    #[test]
+    fn devnet_token_domain_is_pinned() {
+        assert_eq!(
+            hex::encode(devnet_token_domain()),
+            "17685a7f980797b781da4120062d2c167a51fabadc745302b4972328f9718643",
+        );
+    }
+
+    /// With `QUIL_SEED_APP_TOKEN` set, testnet genesis deploys the devnet
+    /// token app and registers it as ONE shards-store row with an empty
+    /// prefix (single shard; consensus filter = the bare 32-byte domain),
+    /// alongside the single QUIL row.
+    ///
+    /// NOTE: env vars are process-global; this test only SETS (and clears)
+    /// `QUIL_SEED_APP_TOKEN`, which no other genesis test reads assertively,
+    /// so parallel test execution is unaffected.
+    #[test]
+    fn testnet_genesis_seeds_devnet_app_token_when_gated() {
+        let crdt = test_crdt();
+        let clock_store = TestClockStore::new();
+        let pubkey = vec![0xEEu8; 585];
+        let shards_store = RecordingShardsStore { rows: std::sync::Mutex::new(vec![]) };
+
+        std::env::set_var("QUIL_SEED_APP_TOKEN", "1");
+        let result = initialize_testnet_genesis_state(
+            1,
+            "",
+            &pubkey,
+            10000,
+            &clock_store,
+            &shards_store,
+            &crdt,
+            &NoopInclusionProver,
+        );
+        std::env::remove_var("QUIL_SEED_APP_TOKEN");
+        result.unwrap();
+
+        let rows = shards_store.rows.lock().unwrap();
+        let domain = devnet_token_domain();
+        let app_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.shard_key.len() == 35 && r.shard_key[3..] == domain)
+            .collect();
+        assert_eq!(app_rows.len(), 1, "expected exactly one devnet app shard row");
+        assert!(app_rows[0].prefix.is_empty(), "single shard ⇒ empty prefix");
+        let l1 = quil_hypergraph::addressing::get_bloom_filter_indices(&domain[..], 256, 3);
+        assert_eq!(&app_rows[0].shard_key[..3], &l1[..]);
+        // The single QUIL row is still written.
+        assert_eq!(rows.len(), 2);
+    }
 
     /// Every mainnet bootstrap peer id MUST equal a genesis archive's DERIVED
     /// Falcon peer id (`peer_id_from_falcon_pubkey`, what the archive actually
@@ -1724,6 +1866,40 @@ mod tests {
 
     fn stub_shards_store() -> StubShardsStore {
         StubShardsStore
+    }
+
+    /// Shards store that records every `put_app_shard` so tests can assert
+    /// exactly which rows genesis wrote.
+    struct RecordingShardsStore {
+        rows: std::sync::Mutex<Vec<quil_types::store::ShardInfo>>,
+    }
+    impl ShardsStore for RecordingShardsStore {
+        fn range_app_shards(&self) -> quil_types::error::Result<Vec<quil_types::store::ShardInfo>> {
+            Ok(self.rows.lock().unwrap().clone())
+        }
+        fn get_app_shards(
+            &self,
+            _: &[u8],
+            _: &[u32],
+        ) -> quil_types::error::Result<Vec<quil_types::store::ShardInfo>> {
+            Ok(vec![])
+        }
+        fn put_app_shard(
+            &self,
+            _: &dyn quil_types::store::Transaction,
+            shard: &quil_types::store::ShardInfo,
+        ) -> quil_types::error::Result<()> {
+            self.rows.lock().unwrap().push(shard.clone());
+            Ok(())
+        }
+        fn delete_app_shard(
+            &self,
+            _: &dyn quil_types::store::Transaction,
+            _: &[u8],
+            _: &[u32],
+        ) -> quil_types::error::Result<()> {
+            Ok(())
+        }
     }
 
     /// Minimal in-memory ClockStore for testnet genesis tests.

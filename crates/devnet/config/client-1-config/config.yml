@@ -89,7 +89,13 @@ engine:
   dataWorkerAnnounceP2pMultiaddrs: []
   dataWorkerAnnounceStreamMultiaddrs: []
   dataWorkerCount: 0
-  dataWorkerFilters: []
+  # The devnet token app: a QUIL-clone deployed at testnet genesis when
+  # QUIL_SEED_APP_TOKEN=1 (quil-engine genesis::devnet_token_domain()).
+  # Single shard, so the consensus filter is the bare 32-byte app address.
+  # Index 0 pins core_id 1. Must be identical across all clients; the devnet
+  # proxy drives the ProverJoin and polls this filter for --app-stop-frame.
+  dataWorkerFilters:
+  - 17685a7f980797b781da4120062d2c167a51fabadc745302b4972328f9718643
   multisigProverEnrollmentPaths: []
   syncTimeoutMs: 4000
   syncCandidates: 8
@@ -110,6 +116,8 @@ engine:
   # partition is retried on the next poll tick — instant partition recovery.
   archiveBlacklistTtl: -1
   blacklist: []
+  # P3: drive app-shard consensus with commonware-simplex (equal votes).
+  appConsensusCw: true
   alertKey: 3ade80f96515e34caaf0c346b842d1f82d2841840f27e12826f4c14326a6bd15d13796c0421f8c440809fceb66c0a5c3c88f93deae16ee3100
   framePublish:
     mode: full

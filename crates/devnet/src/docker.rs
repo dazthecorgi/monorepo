@@ -30,6 +30,8 @@ struct NodeConfigYaml {
     p2p: P2pSection,
     #[serde(default)]
     key: KeySection,
+    #[serde(default)]
+    engine: EngineSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +40,16 @@ struct P2pSection {
     peer_priv_key: String,
     #[serde(rename = "streamListenMultiaddr", default)]
     stream_listen_multiaddr: String,
+}
+
+/// `engine.dataWorkerFilters` — the app-shard filters a client's workers are
+/// pinned to. Carried into `NodeInfo.pinned_filters` so the proxy can drive
+/// joins and track shard-frame progress against the same filters the node
+/// itself is configured with.
+#[derive(Debug, Default, Deserialize)]
+struct EngineSection {
+    #[serde(rename = "dataWorkerFilters", default)]
+    data_worker_filters: Vec<String>,
 }
 
 /// `key.keyManagerFile.encryptionKey` — needed to decrypt `keys.yml`.
@@ -167,6 +179,29 @@ pub async fn get_node_services(exec_dir: &str) -> Result<Vec<NodeInfo>> {
             .ok_or_else(|| anyhow!("missing identity for node {name}"))?;
         let prover_address = derive_prover_address(exec_dir, name)
             .with_context(|| format!("failed to derive prover address for node {name}"))?;
+        let is_archive = name.starts_with("archive-");
+        // Clients carry their pinned app-shard filters into NODE_INFOS; the
+        // node itself ignores `dataWorkerFilters` in archive mode, so archives
+        // always report an empty list. Validate hex here so a fixture typo
+        // fails the run at startup, not as a silent join no-op in the proxy.
+        let pinned_filters = if is_archive {
+            Vec::new()
+        } else {
+            let filters = read_node_config(exec_dir, name)?.engine.data_worker_filters;
+            for f in &filters {
+                let bytes = hex::decode(f).with_context(|| {
+                    format!("invalid hex in dataWorkerFilters for node {name}: {f:?}")
+                })?;
+                if bytes.len() < 32 {
+                    bail!(
+                        "dataWorkerFilters entry for node {name} is {} bytes; the consensus \
+                         filter must be at least the 32-byte app address: {f:?}",
+                        bytes.len()
+                    );
+                }
+            }
+            filters
+        };
         nodes.push(NodeInfo {
             name: name.clone(),
             hostname: name.clone(),
@@ -175,8 +210,9 @@ pub async fn get_node_services(exec_dir: &str) -> Result<Vec<NodeInfo>> {
             peer_id: id.peer_id.clone(),
             peer_priv_key: id.peer_priv_key.clone(),
             falcon_signing_key: id.falcon_signing_key.clone(),
-            is_archive: name.starts_with("archive-"),
+            is_archive,
             prover_address,
+            pinned_filters,
         });
     }
 
@@ -288,6 +324,8 @@ pub struct ExecuteTest<'a> {
     pub resolved_view_partitions: &'a str,
     pub global_timeout: Duration,
     pub node_catchup_timeout: Duration,
+    /// App-shard frame target (0 = app-shard verification disabled).
+    pub app_stop_frame: u64,
 }
 
 /// Starts the compose stack for a run via `docker compose up`.
@@ -327,6 +365,7 @@ pub async fn execute_test(args: ExecuteTest<'_>) -> Result<()> {
             "NODE_CATCHUP_TIMEOUT",
             args.node_catchup_timeout.as_secs().to_string(),
         ),
+        ("APP_STOP_FRAME", args.app_stop_frame.to_string()),
         ("RUST_LOG", proxy_log.to_string()),
     ];
 
@@ -510,6 +549,18 @@ mod tests {
                 "QmYWRH2ujTmiD1m4jCQaLgUqx72AD31P51pZdtynbHi8Sc",
                 "4ee2b6a8ab83db96df43b1c5b0239ce3077fa14e77b23bb6b3ade66e50d4c7e1136478938e868439d2266d800c9cbd472ced584db4a651d8fdf18ebbc46deecb7007a316da06a22246cef854e241c33f295841d1e352b9c182d0b5057fac09e26c99b31dd19f80a6cc014e3b855bbabd8e80",
             ),
+            (
+                "QmeQxmZpi4KwtA6XuGAmEuGR33e9FmxYEujd98bS8vcx7B",
+                "73125ce302ccb56f0b6c92416abf04d2e443cdc67c013dd91cb8f9882b2cddfa46c100bbcf8a824d7c1708acf987ca3016e069e3421ad8a4a572b3a4150cfa28fae3a7f9f935c0a4c5524cc6486415bbbfdcf3d9a24b90a022cff650f741ceb637ebbf34c73410c7ec71fd153fd17fe24200",
+            ),
+            (
+                "Qmckwbw4pio3U5C6f6zGsyoYgaUMTf73T9RthhqJwnXwZh",
+                "2f4ad423fe93c56ae179cbe6cba1907dd8e6e34358a05667f71c5a40482fea9ee1242153ab63f50c671a703bc939d2b129bea1b30489ab6cb4b1c15f75b536e467bd25547b678272f2df014b44925682f17d69e64563aeea4c4116c754a8fec4ee57e6cc03daf02e1707617f0282d0849e00",
+            ),
+            (
+                "QmYUttHg7JLQcxknGwrDMYhYYswKMBDPKMEJMNfGL7meaQ",
+                "8f4a954e38cacbc7959163e353518624c541650dd41f7a104c009292a35401f1fa4d5f303da66c80ea3b895a690fc6a45854930071e633470518df2c537935e6a32f3ce65d3d436bd718b0318484679b0e323de7979031c4cbbced2fcfdcb1ed2a085ae7bea74fbe72a39a51b17249122500",
+            ),
         ];
         for (expected_peer_id, priv_key_hex) in cases {
             let identity = Ed448Identity::from_config_hex(priv_key_hex).unwrap();
@@ -536,6 +587,9 @@ mod tests {
             "archive-3",
             "archive-4",
             "client-1",
+            "client-2",
+            "client-3",
+            "client-4",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -581,5 +635,43 @@ mod tests {
             addr,
             "2b52688ada787c2317c984c97e83bde02116730044c17052aac1b9a5f72ff689"
         );
+        // client-2..4: pinned from `--print-identity`'s PROVER_ADDRESS at
+        // fixture-cut time, so the two derivations pin each other.
+        for (name, expected) in [
+            (
+                "client-2",
+                "061ebc5474f1a267d8c813edf8a4753f68746604a2fa856f7b32de7c3783acb1",
+            ),
+            (
+                "client-3",
+                "2f0121ae1e2fc1ada7eb30c3eac5a0c77eae635595e3da043107cd570c32ebe7",
+            ),
+            (
+                "client-4",
+                "0514be7b5b703609c09dd11f0f29118b5831efb0e30ec5482020a750a183fb2d",
+            ),
+        ] {
+            let addr = derive_prover_address(".", name).expect("derive prover address");
+            assert_eq!(addr, expected, "{name}: prover address drifted");
+        }
+    }
+
+    /// Every client fixture must pin its workers to the SAME single filter —
+    /// the devnet token app's 32-byte domain deployed at testnet genesis
+    /// (`quil_engine::genesis::devnet_token_domain`). Divergence here would
+    /// split the shard committee (different clients proving different shards)
+    /// or point the proxy's join driver and tracker at a shard that does not
+    /// exist.
+    #[test]
+    fn client_pinned_filters_match_devnet_token_domain() {
+        let expected = hex::encode(quil_engine::genesis::devnet_token_domain());
+        for name in ["client-1", "client-2", "client-3", "client-4"] {
+            let cfg = read_node_config(".", name).expect("read client config");
+            assert_eq!(
+                cfg.engine.data_worker_filters,
+                vec![expected.clone()],
+                "{name}: dataWorkerFilters must be exactly the devnet token app domain"
+            );
+        }
     }
 }

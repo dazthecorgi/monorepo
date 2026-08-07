@@ -52,14 +52,22 @@ impl AppShardService for AppShardRpcServer {
         if req.filter.is_empty() {
             return Err(Status::invalid_argument("filter required"));
         }
-        let frame = if req.frame_number == 0 {
-            self.clock_store
-                .get_latest_shard_clock_frame(&req.filter)
-                .ok()
+        // "Don't have it" (NotFound → `frame: None`) and "can't read the
+        // store" (→ `Status::internal`) MUST stay distinguishable: clients
+        // (the devnet frame monitor among them) treat `frame: None` as an
+        // authoritative miss and a Status error as a transient blip. The old
+        // `.ok()` collapse here turned one RocksDB read hiccup into "this
+        // node never held the frame".
+        let lookup = if req.frame_number == 0 {
+            self.clock_store.get_latest_shard_clock_frame(&req.filter)
         } else {
             self.clock_store
                 .get_shard_clock_frame(&req.filter, req.frame_number, false)
-                .ok()
+        };
+        let frame = match lookup {
+            Ok(f) => Some(f),
+            Err(quil_types::error::QuilError::NotFound(_)) => None,
+            Err(e) => return Err(Status::internal(e.to_string())),
         };
         Ok(Response::new(global::AppShardFrameResponse {
             frame,

@@ -49,9 +49,12 @@ struct Cli {
     /// Also save artifacts for successful runs.
     #[arg(long = "save-logs-on-success", global = true)]
     save_logs_on_success: bool,
-    /// The timeout (seconds) for an entire test run.
-    #[arg(long = "global-timeout", global = true, default_value = "300")]
-    global_timeout: String,
+    /// The timeout (seconds) for an entire test run. Defaults to 300, or 600
+    /// when `--app-stop-frame` is set (app-shard activation headroom). An
+    /// `Option` rather than a clap default so an EXPLICIT `--global-timeout=300`
+    /// is distinguishable from "left unset" and never silently bumped.
+    #[arg(long = "global-timeout", global = true)]
+    global_timeout: Option<u64>,
     /// The timeout while waiting for a single node to reach the stopframe after other nodes reached.
     #[arg(long = "node-catchup-timeout", global = true, default_value = "60")]
     node_catchup_timeout: String,
@@ -77,6 +80,11 @@ enum Command {
         /// entry; repeat an entry on consecutive views to hold it open.
         #[arg(long = "view-partitions", default_value = "")]
         view_partitions: String,
+        /// App-shard frame number the pinned token-app shard must reach for the
+        /// run to succeed (additive to the global stop-frame checks).
+        /// 0 disables app-shard verification entirely.
+        #[arg(long = "app-stop-frame", default_value_t = 0)]
+        app_stop_frame: u64,
     },
 }
 
@@ -123,13 +131,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         global_timeout,
         node_catchup_timeout,
     } = cli;
-    let opts = Opts {
+    let mut opts = Opts {
         working_dir,
         listen_port,
         verbose,
         out_dir,
         save_logs_on_success,
-        global_timeout: Duration::from_secs(global_timeout.parse()?),
+        global_timeout: Duration::from_secs(global_timeout.unwrap_or(300)),
         node_catchup_timeout: Duration::from_secs(node_catchup_timeout.parse()?),
     };
 
@@ -137,12 +145,37 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         stop_frame,
         min_nodes,
         view_partitions,
+        app_stop_frame,
     } = command;
+
+    // App-shard activation needs headroom over the 300 s default budget: the
+    // shard only starts finalizing after the clients' allocations turn Active
+    // at an epoch boundary and re-register fresh leaf roots (join → confirm →
+    // epoch-boundary reconfirm ≈ 2 epochs). At the compose file's devnet
+    // cadence (1 s global frames, 15-frame epochs) a full app run measures
+    // ~150 s wall clock; 600 s covers a markedly slower host, plus stalled
+    // views at 30 s each. Bump only when the user did not choose a timeout —
+    // `Option` makes "left unset" detectable, so an explicit
+    // `--global-timeout=300` is honored.
+    if app_stop_frame > 0 && global_timeout.is_none() {
+        tracing::warn!(
+            "--app-stop-frame is set and --global-timeout left unset; raising the global \
+             timeout to 600s to cover app-shard activation latency"
+        );
+        opts.global_timeout = Duration::from_secs(600);
+    }
 
     let (cancel, state) = prepare_run(&opts.working_dir, min_nodes).await?;
 
-    let (results, interrupted) =
-        run_single_mode(&opts, &cancel, state, stop_frame, &view_partitions).await?;
+    let (results, interrupted) = run_single_mode(
+        &opts,
+        &cancel,
+        state,
+        stop_frame,
+        &view_partitions,
+        app_stop_frame,
+    )
+    .await?;
 
     Ok(finish_run(&results, interrupted))
 }
@@ -203,6 +236,7 @@ async fn run_single_mode(
     state: CommonState,
     stop_frame: i32,
     view_partitions: &str,
+    app_stop_frame: u64,
 ) -> Result<(Vec<TestResult>, bool)> {
     let (original, resolved) = resolve_view_partitions(&state.exec_dir, view_partitions)
         .context("failed to resolve view partitions")?;
@@ -237,6 +271,7 @@ async fn run_single_mode(
         parallel: 1,
         global_timeout: opts.global_timeout,
         node_catchup_timeout: opts.node_catchup_timeout,
+        app_stop_frame,
     };
 
     let run_id = new_run_id();

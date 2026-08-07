@@ -27,7 +27,7 @@ use quil_engine::bitmasks;
 use quil_engine::consensus_wire::decode_global_frame;
 use quil_types::proto::global::SubmitGlobalConsensusRequest;
 
-use crate::simplex_view::{decode_view, VoteKind, CW_BLOCK_CHANNEL, CW_VOTE_CHANNEL};
+use crate::simplex_view::{decode_view, CW_BLOCK_CHANNEL, CW_VOTE_CHANNEL};
 
 /// The epoch global consensus runs in. The node constructs the global engine
 /// with `epoch: 0` hardcoded, so anything else on these channels is not global
@@ -213,11 +213,12 @@ impl CwConsensusCursor {
                 channel,
                 "decoded simplex vote"
             );
-            let source = match (channel, decoded.kind) {
-                (CW_VOTE_CHANNEL, VoteKind::Notarize | VoteKind::Finalize) => {
-                    EventSource::ActiveVote
-                }
-                _ => EventSource::Passive,
+            let source = if channel == CW_VOTE_CHANNEL && decoded.kind.is_active_vote() {
+                EventSource::ActiveVote
+            } else {
+                // A certificate is aggregated votes rebroadcast by whoever
+                // assembled them, so it attests to nothing about its sender.
+                EventSource::Passive
             };
             // The frame here is an attribution, not a fact: this message names
             // only a view, so it is stamped with the frame consensus is working

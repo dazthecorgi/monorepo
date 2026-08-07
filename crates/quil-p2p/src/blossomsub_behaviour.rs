@@ -31,10 +31,12 @@
 //! validator still gates forwarding, matching the fork's receive-path hook.
 //! * **Composite/overlapping-bitmask mesh: dropped** (each bitmask is an
 //! exact-match topic). This is the deliberate "remove the variable" step.
-//! * **Forward filter (devnet partitions): not supported on stock gossipsub.**
-//! The methods remain (API compat) but are no-ops; installing one logs a
-//! one-time warning. Devnet bipartite-partition tests won't partition until
-//! this is re-implemented behind a wrapper hook.
+//! * **Forward filter (devnet partitions): re-implemented via the vendored
+//! gossipsub's send-path hook.** The vendored `libp2p-gossipsub` (see the
+//! `[patch.crates-io]` entry) gates every outbound `Publish`/`Forward` RPC on
+//! a per-(message author, destination) filter; this wrapper adapts the
+//! historical `Fn(&source, &dest) -> bool` API onto it and re-installs the
+//! filter whenever `set_signing_identity` rebuilds the inner behaviour.
 //! * **`send_subscriptions_to_peer`: no-op.** Stock gossipsub re-sends
 //! subscriptions automatically when a connection is (re)established.
 
@@ -135,8 +137,9 @@ pub struct BlossomSubBehaviour {
     /// Whether gossipsub metric families have been registered (guards against
     /// double-registration on a repeated `set_signing_identity`).
     metrics_registered: bool,
-    /// Whether we've already warned that forward filters are unsupported.
-    warned_forward_filter: bool,
+    /// Installed forward filter `(source, dest) -> forward?`, mirrored here so
+    /// it survives the `set_signing_identity` rebuild of `inner`.
+    forward_filter: Option<Arc<dyn Fn(&PeerId, &PeerId) -> bool + Send + Sync>>,
     /// Prometheus registry carrying gossipsub's metric families plus the
     /// swarm-level `libp2p_*` families that `node.rs` registers afterward.
     metrics_registry: crate::metrics::SharedRegistry,
@@ -176,7 +179,7 @@ impl BlossomSubBehaviour {
             pending_events: VecDeque::new(),
             last_need_peers_check: std::time::Instant::now(),
             metrics_registered: false,
-            warned_forward_filter: false,
+            forward_filter: None,
             metrics_registry: Arc::new(std::sync::Mutex::new(
                 prometheus_client::registry::Registry::default(),
             )),
@@ -236,6 +239,9 @@ impl BlossomSubBehaviour {
         for peer in self.direct_peers.clone() {
             self.inner.add_explicit_peer(&peer);
         }
+        // The rebuild replaced `inner` wholesale — put the forward filter back,
+        // or a partition installed before the re-key silently stops gating.
+        self.install_forward_filter();
     }
 
     /// Set only the local peer id (test-harness / non-signing path).
@@ -253,34 +259,46 @@ impl BlossomSubBehaviour {
         self.validators.insert(bitmask, Arc::new(validator));
     }
 
-    /// Install a per-(source, target) forward filter. **Unsupported on stock
-    /// gossipsub** — kept for API compatibility; a no-op with a one-time warning.
+    /// Install a per-(source, target) forward filter: return `false` to stop
+    /// this node relaying a message authored by `source` to `target`. Enforced
+    /// by the vendored gossipsub's send-path hook on every outbound
+    /// `Publish`/`Forward` RPC (mesh forwards, flood publishes and IWANT-served
+    /// replies), keyed on the message's SIGNED author — so an A-authored
+    /// message stays blocked toward B even when it arrives via a third peer.
     pub fn set_forward_filter(
         &mut self,
-        _filter: impl Fn(&PeerId, &PeerId) -> bool + Send + Sync + 'static,
+        filter: impl Fn(&PeerId, &PeerId) -> bool + Send + Sync + 'static,
     ) {
-        self.warn_forward_filter_unsupported();
+        self.forward_filter = Some(Arc::new(filter));
+        self.install_forward_filter();
     }
 
-    /// Same as [`Self::set_forward_filter`] but boxed. No-op on stock gossipsub.
+    /// Same as [`Self::set_forward_filter`] but boxed.
     pub fn set_forward_filter_boxed(
         &mut self,
-        _filter: Box<dyn Fn(&PeerId, &PeerId) -> bool + Send + Sync>,
+        filter: Box<dyn Fn(&PeerId, &PeerId) -> bool + Send + Sync>,
     ) {
-        self.warn_forward_filter_unsupported();
+        self.forward_filter = Some(Arc::from(filter));
+        self.install_forward_filter();
     }
 
-    /// Remove any installed forward filter. No-op on stock gossipsub.
-    pub fn clear_forward_filter(&mut self) {}
+    /// Remove any installed forward filter.
+    pub fn clear_forward_filter(&mut self) {
+        self.forward_filter = None;
+        self.install_forward_filter();
+    }
 
-    fn warn_forward_filter_unsupported(&mut self) {
-        if !self.warned_forward_filter {
-            self.warned_forward_filter = true;
-            tracing::warn!(
-                "gossip forward filter is unsupported on stock gossipsub; \
-                 devnet network partitions will not be enforced"
-            );
-        }
+    /// Push the mirrored filter down into `inner`, adapting the historical
+    /// `(source, dest)` shape onto gossipsub's `(Option<author>, dest)` hook.
+    /// An unsigned message (`None` author — cannot happen under StrictSign,
+    /// which this network runs) passes open, matching the partitioner's
+    /// "no entry ⇒ forward" semantics.
+    fn install_forward_filter(&mut self) {
+        self.inner.set_forward_filter(self.forward_filter.clone().map(|f| {
+            Arc::new(move |src: Option<&PeerId>, dst: &PeerId| {
+                src.map_or(true, |s| f(s, dst))
+            }) as gossipsub::ForwardFilter
+        }));
     }
 
     /// Subscribe to a bitmask.
@@ -850,6 +868,129 @@ mod propagation_tests {
         assert!(
             ok,
             "both leaves must receive the hub's published message (published={published}, a={a_got}, b={b_got})"
+        );
+    }
+
+    /// The forward filter partitions a relay: with a filter on the hub
+    /// blocking (a → b), a message leaf_a publishes reaches the hub but is
+    /// never relayed to leaf_b — and after clearing the filter, a fresh
+    /// publish flows a → hub → b again. The filter is directional and keyed
+    /// on the SIGNED author, so only the (a, b) pair is gated.
+    #[tokio::test]
+    async fn forward_filter_partitions_relay() {
+        let bitmask = vec![0x81u8];
+        let blocked_payload = b"quilibrium-partitioned-message".to_vec();
+        let healed_payload = b"quilibrium-healed-message".to_vec();
+
+        let mut hub = build_swarm();
+        let mut leaf_a = build_swarm();
+        let mut leaf_b = build_swarm();
+
+        let hub_id = *hub.local_peer_id();
+        let a_id = *leaf_a.local_peer_id();
+        let b_id = *leaf_b.local_peer_id();
+
+        // Block exactly (author == a, dest == b) on the relay.
+        {
+            let a = a_id;
+            let b = b_id;
+            hub.behaviour_mut()
+                .set_forward_filter(move |src, dst| !(*src == a && *dst == b));
+        }
+
+        hub.behaviour_mut().subscribe(bitmask.clone());
+        leaf_a.behaviour_mut().subscribe(bitmask.clone());
+        leaf_b.behaviour_mut().subscribe(bitmask.clone());
+
+        hub.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+            .expect("listen");
+        let hub_addr: Multiaddr = loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = hub.select_next_some().await {
+                break address;
+            }
+        };
+        leaf_a.dial(hub_addr.clone()).expect("leaf_a dial");
+        leaf_b.dial(hub_addr.clone()).expect("leaf_b dial");
+
+        let mut published_blocked = false;
+        let mut hub_got_blocked = false;
+        let mut b_got_blocked = false;
+        let mut published_healed = false;
+        let mut b_got_healed = false;
+        // Ticks (grace period) the partition holds after the hub has the
+        // message, before we clear the filter and prove the path heals.
+        let mut grace: Option<tokio::time::Instant> = None;
+
+        let ok = tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                tokio::select! {
+                    ev = hub.select_next_some() => {
+                        if let SwarmEvent::Behaviour(BlossomSubEvent::Message { message, .. }) = ev {
+                            if message.data == blocked_payload {
+                                hub_got_blocked = true;
+                            }
+                        }
+                    }
+                    _ = leaf_a.select_next_some() => {}
+                    ev = leaf_b.select_next_some() => {
+                        if let SwarmEvent::Behaviour(BlossomSubEvent::Message { message, .. }) = ev {
+                            if message.data == blocked_payload {
+                                b_got_blocked = true;
+                            }
+                            if message.data == healed_payload {
+                                b_got_healed = true;
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+
+                if b_got_blocked {
+                    // Partition breached — fail fast.
+                    return false;
+                }
+                if !published_blocked && leaf_a.behaviour().peer_subscribed_to(&hub_id, &bitmask) {
+                    if leaf_a
+                        .behaviour_mut()
+                        .publish(bitmask.clone(), blocked_payload.clone())
+                        .is_ok()
+                    {
+                        published_blocked = true;
+                    }
+                }
+                if hub_got_blocked && grace.is_none() {
+                    grace = Some(tokio::time::Instant::now() + Duration::from_secs(3));
+                }
+                if let Some(deadline) = grace {
+                    if !published_healed && tokio::time::Instant::now() >= deadline {
+                        // Partition held for the grace window: heal and prove
+                        // traffic flows again with a fresh payload (the old one
+                        // sits in the hub's duplicate cache and is never
+                        // re-forwarded).
+                        hub.behaviour_mut().clear_forward_filter();
+                        if leaf_a
+                            .behaviour_mut()
+                            .publish(bitmask.clone(), healed_payload.clone())
+                            .is_ok()
+                        {
+                            published_healed = true;
+                        }
+                    }
+                }
+                if b_got_healed {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            ok,
+            "partition must hold while filtered and heal after clearing \
+             (published_blocked={published_blocked}, hub_got_blocked={hub_got_blocked}, \
+              b_got_blocked={b_got_blocked}, published_healed={published_healed}, \
+              b_got_healed={b_got_healed})"
         );
     }
 }

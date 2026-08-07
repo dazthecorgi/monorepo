@@ -405,6 +405,23 @@ pub fn materialize_token_deploy(
     Ok(metadata_addr)
 }
 
+/// Derive the domain a `TokenDeploy` of `config` would create:
+/// `poseidon(TOKEN_PREFIX ‖ content_digest(config_tree))`. Pure function of
+/// the config (no CRDT involved) — the same derivation
+/// `materialize_token_deploy_init` performs, exposed so callers (e.g. devnet
+/// genesis) can pin the app address of a deterministic deploy up front.
+pub fn token_deploy_domain(
+    config: &super::config::TokenConfiguration,
+) -> Result<[u8; 32]> {
+    let config_tree = super::metadata_schema::build_token_configuration_metadata_tree(config)?;
+    let config_commit = crate::hypergraph_state::tree_content_digest(&config_tree);
+    let mut preimage =
+        Vec::with_capacity(super::constants::TOKEN_PREFIX.len() + config_commit.len());
+    preimage.extend_from_slice(super::constants::TOKEN_PREFIX);
+    preimage.extend_from_slice(&config_commit);
+    quil_crypto::poseidon::hash_bytes_to_32(&preimage)
+}
+
 /// Materialize a **new** TokenDeploy — Go `TokenIntrinsic.Deploy` deploy
 /// branch (`token_intrinsic.go:255-307`, the `domain == TOKEN_BASE_DOMAIN`
 /// path). Unlike `materialize_token_deploy` (the update path, which writes
@@ -430,12 +447,7 @@ pub fn materialize_token_deploy_init(
 
     // 2. Derive the domain from the config CONTENT digest (retired from the KZG
     //    commit → SHA-512 of the config's flat leaves; PQ-safe, no BLS48-581).
-    let config_commit = crate::hypergraph_state::tree_content_digest(&config_tree);
-    let mut preimage =
-        Vec::with_capacity(super::constants::TOKEN_PREFIX.len() + config_commit.len());
-    preimage.extend_from_slice(super::constants::TOKEN_PREFIX);
-    preimage.extend_from_slice(&config_commit);
-    let domain = quil_crypto::poseidon::hash_bytes_to_32(&preimage)?;
+    let domain = token_deploy_domain(config)?;
 
     // 3. RDF schema (templated by domain + behavior).
     let rdf = super::rdf_schema::prepare_rdf_schema_from_config(&domain, config.behavior);

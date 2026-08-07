@@ -85,7 +85,32 @@ pub const JOIN_FILTER_COOLDOWN_FRAMES: u64 = 30;
 /// well past the round-trip, but short enough that a failed submit (cooldown
 /// never recorded on success) retries promptly — critical, since a missed
 /// re-confirm means eviction at the next audit.
-pub const RECONFIRM_COOLDOWN_FRAMES: u64 = 30;
+///
+/// This is the MAINNET ceiling (720-frame epochs), and is deliberately private
+/// so no caller can bypass the epoch clamp — reach for
+/// [`reconfirm_cooldown_frames`] instead.
+const RECONFIRM_COOLDOWN_FRAMES: u64 = 30;
+
+/// The re-confirm backoff actually in force, clamped to half the CONFIGURED
+/// epoch length.
+///
+/// The obligation this gates is per-epoch, so a cooldown at or above the epoch
+/// length starves it: the prover renews only every OTHER epoch and reads as
+/// `ExpiredEpoch` in the skipped ones — dropped from `committee_eligible`, and
+/// every storage attestation anchored there rejected. Observed with
+/// `QUIL_EPOCH_LENGTH_FRAMES=15` (devnet), which stalled the app shard at frame
+/// 1. Halving leaves room for one retry inside the epoch; mainnet (720) and
+/// testnet (60) still clamp to the unchanged 30.
+pub fn reconfirm_cooldown_frames() -> u64 {
+    clamp_reconfirm_cooldown(quil_types::consensus::epoch_length_frames())
+}
+
+/// The clamp itself, split out from the process-global epoch read so it is
+/// testable without mutating `EPOCH_LENGTH_OVERRIDE` (which every other test in
+/// the binary shares).
+fn clamp_reconfirm_cooldown(epoch_length: u64) -> u64 {
+    RECONFIRM_COOLDOWN_FRAMES.min((epoch_length / 2).max(1))
+}
 
 /// Backoff before re-proposing a join to a shard that *rejected* our
 /// last join. `JOIN_FILTER_COOLDOWN_FRAMES` only gates re-proposal off
@@ -738,7 +763,7 @@ impl ProverLifecycle {
     }
 
     /// Drop `candidates` whose per-epoch re-confirm was submitted within the
-    /// last `RECONFIRM_COOLDOWN_FRAMES` — mirrors `filter_recent_leave_attempts`.
+    /// last [`reconfirm_cooldown_frames`] — mirrors `filter_recent_leave_attempts`.
     fn filter_recent_reconfirm_attempts(
         &self,
         candidates: Vec<Vec<u8>>,
@@ -747,15 +772,14 @@ impl ProverLifecycle {
         let Ok(mut guard) = self.last_reconfirm_attempt.write() else {
             return candidates;
         };
-        guard.retain(|_, last| {
-            frame_number.saturating_sub(*last) < RECONFIRM_COOLDOWN_FRAMES
-        });
+        let cooldown = reconfirm_cooldown_frames();
+        guard.retain(|_, last| frame_number.saturating_sub(*last) < cooldown);
         candidates
             .into_iter()
             .filter(|f| {
                 guard
                     .get(f)
-                    .map(|&last| frame_number.saturating_sub(last) >= RECONFIRM_COOLDOWN_FRAMES)
+                    .map(|&last| frame_number.saturating_sub(last) >= cooldown)
                     .unwrap_or(true)
             })
             .collect()
@@ -2031,6 +2055,62 @@ fn compute_world_bytes_from_summaries(summaries: &[ProverShardSummary]) -> BigIn
         .map(|s| if s.total_size > 0 { s.total_size } else { 1 })
         .sum();
     BigInt::from(total.max(1))
+}
+
+#[cfg(test)]
+mod reconfirm_cooldown_tests {
+    use super::*;
+    use quil_types::consensus::{EPOCH_LENGTH_FRAMES, TESTNET_EPOCH_LENGTH_FRAMES};
+
+    /// Mainnet and testnet keep the tuned 30-frame backoff — the clamp is
+    /// inert wherever an epoch is comfortably longer than the round-trip.
+    #[test]
+    fn long_epochs_keep_the_tuned_backoff() {
+        assert_eq!(
+            clamp_reconfirm_cooldown(EPOCH_LENGTH_FRAMES),
+            RECONFIRM_COOLDOWN_FRAMES
+        );
+        assert_eq!(
+            clamp_reconfirm_cooldown(TESTNET_EPOCH_LENGTH_FRAMES),
+            RECONFIRM_COOLDOWN_FRAMES
+        );
+    }
+
+    /// The regression. `QUIL_EPOCH_LENGTH_FRAMES=15` (devnet compose) against
+    /// the raw constant permitted a re-confirm only every OTHER epoch, so the
+    /// allocation read `ExpiredEpoch` in the skipped ones: dropped from the
+    /// app-shard committee, and every storage attestation anchored there
+    /// rejected. The cooldown must stay strictly inside one epoch.
+    #[test]
+    fn short_epoch_cooldown_fits_inside_one_epoch() {
+        for epoch in [2u64, 4, 15, 16, 30, 59] {
+            let cooldown = clamp_reconfirm_cooldown(epoch);
+            assert!(
+                cooldown < epoch,
+                "epoch {epoch}: cooldown {cooldown} starves the per-epoch re-confirm"
+            );
+            assert!(cooldown >= 1, "epoch {epoch}: cooldown must not be zero");
+        }
+    }
+
+    /// Halving leaves room for one prompt retry inside the epoch when the
+    /// first submit fails (the cooldown is only stamped on attempt, and a
+    /// missed re-confirm means eviction at the next audit).
+    #[test]
+    fn short_epoch_allows_a_retry_within_the_epoch() {
+        assert_eq!(clamp_reconfirm_cooldown(15), 7);
+        // Two attempts land inside epoch 4 (frames 60..74) at 15-frame epochs.
+        let cooldown = clamp_reconfirm_cooldown(15);
+        assert!(60 + cooldown < 75);
+    }
+
+    /// Degenerate epoch lengths must not produce a zero cooldown, which would
+    /// re-publish an identical confirm every single frame.
+    #[test]
+    fn degenerate_epochs_never_yield_zero() {
+        assert_eq!(clamp_reconfirm_cooldown(0), 1);
+        assert_eq!(clamp_reconfirm_cooldown(1), 1);
+    }
 }
 
 #[cfg(test)]

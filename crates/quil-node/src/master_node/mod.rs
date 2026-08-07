@@ -37,17 +37,65 @@ pub(crate) async fn start(
     // the join→confirm→activate lifecycle runs in minutes. Every epoch timing
     // rule reads `epoch_length_frames()`, so this one call scales them all.
     quil_types::consensus::init_epoch_length_for_network(network);
-    // Localnet-only shortcut: `QUIL_EPOCH_LENGTH_FRAMES=<n>` shrinks the epoch so
+    // Non-mainnet shortcut: `QUIL_EPOCH_LENGTH_FRAMES=<n>` shrinks the epoch so
     // the join→confirm→activate lifecycle completes in a handful of frames (the
     // confirm is gated to the epoch AFTER join). CONSENSUS PARAMETER — every node
-    // in the net MUST set the same value; localnet.sh sets it uniformly. Never
-    // set on a shared testnet/mainnet. Ignored on mainnet (network 0).
+    // in the net MUST set the same value; localnet.sh and the devnet compose set
+    // it uniformly. The gate is `network != 0`, i.e. it also applies on a public
+    // testnet — never set it ad hoc on a shared net, where a lone override forks
+    // that node off. Ignored on mainnet (network 0).
     if network != 0 {
         if let Ok(v) = std::env::var("QUIL_EPOCH_LENGTH_FRAMES") {
             if let Ok(frames) = v.parse::<u64>() {
                 if frames > 0 {
                     quil_types::consensus::set_epoch_length_frames(frames);
-                    warn!(frames, "QUIL_EPOCH_LENGTH_FRAMES override active (localnet only)");
+                    warn!(frames, "QUIL_EPOCH_LENGTH_FRAMES override active (non-mainnet)");
+                }
+            }
+        }
+        // Cadence shortcut, same contract as the epoch override above
+        // (CONSENSUS PARAMETER — set identically on every node or not at
+        // all; never ad hoc on a shared net): the global frame target
+        // interval, feeding the ASERT difficulty target and the proposer's
+        // pacing/timestamp stamping. The effective floor is the VDF solve at
+        // MIN_DIFFICULTY (~3 s). App-shard frames need no counterpart: under CW
+        // they are unpaced (views roll as fast as rounds finalize) and their
+        // wall-clock cost is activation, which is denominated in global frames
+        // and epochs — so this one knob scales the whole devnet run.
+        //
+        // Range-checked in the setters (see `difficulty.rs`): an out-of-range
+        // value is REFUSED, not clamped, so a misconfigured devnet is visible
+        // in the log instead of silently wrapping the ASERT Q16 math.
+        if let Ok(v) = std::env::var("QUIL_IDEAL_FRAME_TIME_MS") {
+            if let Ok(ms) = v.parse::<i64>() {
+                if quil_engine::difficulty::set_ideal_frame_time_ms(ms) {
+                    warn!(ms, "QUIL_IDEAL_FRAME_TIME_MS override active (non-mainnet)");
+                } else {
+                    warn!(
+                        ms,
+                        min = quil_engine::difficulty::MIN_IDEAL_FRAME_TIME_MS,
+                        max = quil_engine::difficulty::IDEAL_FRAME_TIME,
+                        "QUIL_IDEAL_FRAME_TIME_MS out of range — ignoring override"
+                    );
+                }
+            }
+        }
+        // Companion knob: the VDF difficulty floor. On a devnet the ASERT
+        // anchor decays to the floor immediately, so the floor is the
+        // operating difficulty and thus the per-frame VDF solve time
+        // (50_000 ≈ 2.5-3 s, roughly linear) — without lowering it, a frame
+        // interval below ~3 s stays VDF-bound.
+        if let Ok(v) = std::env::var("QUIL_MIN_DIFFICULTY") {
+            if let Ok(d) = v.parse::<u64>() {
+                if quil_engine::difficulty::set_min_difficulty(d) {
+                    warn!(difficulty = d, "QUIL_MIN_DIFFICULTY override active (non-mainnet)");
+                } else {
+                    warn!(
+                        difficulty = d,
+                        min = quil_engine::difficulty::MIN_SETTABLE_DIFFICULTY,
+                        max = quil_engine::difficulty::MIN_DIFFICULTY,
+                        "QUIL_MIN_DIFFICULTY out of range — ignoring override"
+                    );
                 }
             }
         }

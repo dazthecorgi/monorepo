@@ -100,16 +100,9 @@ impl EnrollmentMonitor {
         }
     }
 
-    /// Lazily connect a plaintext NodeService channel.
+    /// Lazily connect a plaintext NodeService channel (bounded dial).
     async fn connect(address: &str) -> Option<NodeServiceClient<Channel>> {
-        let url = format!("http://{address}");
-        match Channel::from_shared(url).ok()?.connect().await {
-            Ok(ch) => Some(NodeServiceClient::new(ch)),
-            Err(e) => {
-                tracing::debug!(address, error = %e, "enrollment monitor: connect failed");
-                None
-            }
-        }
+        crate::netutil::connect_node_service("enrollment monitor", address).await
     }
 
     /// Poll one archive: confirm every client's prover-vertex has ≥1 entry.

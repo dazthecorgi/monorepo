@@ -495,7 +495,7 @@ impl LeaderProvider<GlobalState> for GlobalLeaderProvider {
                 .as_millis() as i64;
             let target = prior_header.timestamp;
             let wait_ms = (target - now_ms)
-                .clamp(0, crate::difficulty::IDEAL_FRAME_TIME);
+                .clamp(0, crate::difficulty::ideal_frame_time_ms());
             if wait_ms > 0 {
                 tracing::debug!(
                     frame = frame_number,
@@ -609,13 +609,15 @@ impl LeaderProvider<GlobalState> for GlobalLeaderProvider {
         // ------------------------------------------------------------------
         // 6. Compute difficulty
         // ------------------------------------------------------------------
-        // Go adds 10 seconds to the timestamp for the difficulty
-        // calculation, matching the expected block interval.
+        // Go adds one frame interval (10 s) to the timestamp for the difficulty
+        // calculation, matching the expected block interval. This future-dated
+        // timestamp also lands on the header, which is what the pacing gate
+        // above sleeps against — so the interval knob sets the cadence.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        let timestamp = now_ms + 10_000; // +10s, matching Go
+        let timestamp = now_ms + crate::difficulty::ideal_frame_time_ms();
         let difficulty = self.difficulty_adjuster.get_next_difficulty(rank, timestamp);
 
         tracing::debug!(

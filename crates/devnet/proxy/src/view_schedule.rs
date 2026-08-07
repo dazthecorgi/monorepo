@@ -19,11 +19,49 @@
 //!   instead of reporting a pass.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use devnet::viewpartitions::ViewPartitionEntry;
 
 use crate::partitioner::NetworkPartitioner;
+
+/// A one-way latch: set once the schedule has run past its last entry, i.e. the
+/// network is whole again and stays that way.
+///
+/// It exists so the app-shard participation check can prove what the global
+/// rejoin check proves — that each committee member voted *after* the partition
+/// healed. The global side gets that statically: `validate_partition_views`
+/// rejects a schedule that does not heal before the global stop frame, so
+/// "at or after the stop frame's view" is provably post-heal. The app side
+/// cannot borrow that argument, because shard views are the shard engine's own
+/// simplex views and the partition schedule keys on global views — two
+/// unrelated numberings. So the heal is published as a runtime signal instead,
+/// and lives here rather than in `app_shard_monitor` to keep the schedule from
+/// depending on the tracker (or the reverse).
+#[derive(Debug, Default)]
+pub struct HealSignal(AtomicBool);
+
+impl HealSignal {
+    /// A signal that starts already set, for a run with nothing to heal from.
+    pub fn healed() -> Self {
+        Self(AtomicBool::new(true))
+    }
+
+    /// Latch the signal. [`ViewSchedule::observe_view`] is the only production
+    /// caller — it is the one place that knows the schedule is finished — but
+    /// tests of the consumers need to drive the transition directly.
+    pub(crate) fn set(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the network is known to be whole. `Relaxed` is enough: the
+    /// consumer only needs to see the flag eventually, and it never guards
+    /// access to other data.
+    pub fn is_healed(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// Mutable schedule state. Kept behind one lock so the monotone check and the
 /// partition swap are indivisible against the other listener tasks.
@@ -40,7 +78,12 @@ struct State {
 
 pub struct ViewSchedule {
     entries: HashMap<u64, ViewPartitionEntry>,
+    /// Highest view with an entry; `None` when the schedule is empty. Healing
+    /// is only final past this view — an entry-less view in the middle of the
+    /// schedule clears partitions, but the next entry re-applies one.
+    last_entry_view: Option<u64>,
     partitioner: Arc<NetworkPartitioner>,
+    heal: Arc<HealSignal>,
     state: Mutex<State>,
 }
 
@@ -49,11 +92,28 @@ impl ViewSchedule {
         entries: HashMap<u64, ViewPartitionEntry>,
         partitioner: Arc<NetworkPartitioner>,
     ) -> Self {
+        let last_entry_view = entries.keys().copied().max();
+        // With no entries there is no partition to heal from, so the run is
+        // born whole and every downstream check behaves exactly as it did
+        // before the signal existed.
+        let heal = Arc::new(if entries.is_empty() {
+            HealSignal::healed()
+        } else {
+            HealSignal::default()
+        });
         Self {
             entries,
+            last_entry_view,
             partitioner,
+            heal,
             state: Mutex::new(State::default()),
         }
+    }
+
+    /// The heal latch, for consumers that must distinguish pre- from post-heal
+    /// consensus activity.
+    pub fn heal_signal(&self) -> Arc<HealSignal> {
+        Arc::clone(&self.heal)
     }
 
     /// Apply a view-0 entry, if the schedule has one, before consensus starts.
@@ -96,6 +156,14 @@ impl ViewSchedule {
             None => {
                 tracing::info!(view, "no view partition entry, clearing partitions");
                 self.partitioner.clear_partitions();
+                // Past the last entry there is nothing left to re-apply, so
+                // this clear is the permanent heal. An entry-less view *between*
+                // entries also clears, but the schedule will partition again, so
+                // it must not latch.
+                if self.last_entry_view.is_some_and(|last| view > last) && !self.heal.is_healed() {
+                    tracing::info!(view, "partition schedule healed");
+                    self.heal.set();
+                }
             }
         }
     }
@@ -269,6 +337,50 @@ mod tests {
 
         sched.observe_view(4);
         assert_eq!(sched.missed_views(), vec![1]);
+    }
+
+    /// The heal latch must mean "no partition will be applied again", not
+    /// merely "no partition right now" — a gap between entries clears the
+    /// partitioner but the schedule goes on to re-partition.
+    #[test]
+    fn heal_latches_past_the_last_entry_and_not_on_a_gap() {
+        let (_, a58, _, b58) = peers();
+        let (_p, sched) = schedule(&[3, 5], &a58, &b58);
+        let heal = sched.heal_signal();
+        assert!(!heal.is_healed(), "a scheduled run starts partitioned");
+
+        sched.observe_view(3);
+        assert!(!heal.is_healed());
+        sched.observe_view(4); // clears, but view 5 still has an entry
+        assert!(!heal.is_healed(), "a gap between entries is not the heal");
+        sched.observe_view(5);
+        assert!(!heal.is_healed());
+        sched.observe_view(6);
+        assert!(heal.is_healed(), "past the last entry the run is whole");
+    }
+
+    #[test]
+    fn empty_schedule_is_born_healed() {
+        let partitioner = Arc::new(NetworkPartitioner::new());
+        let sched = ViewSchedule::new(HashMap::new(), partitioner);
+        assert!(
+            sched.heal_signal().is_healed(),
+            "with nothing to heal from, a run behaves as it did before the signal existed"
+        );
+    }
+
+    /// A view-0 entry is applied before consensus starts, so the heal is the
+    /// first real view.
+    #[test]
+    fn view_zero_entry_heals_at_the_first_observed_view() {
+        let (_, a58, _, b58) = peers();
+        let (_p, sched) = schedule(&[0], &a58, &b58);
+        let heal = sched.heal_signal();
+
+        sched.apply_initial();
+        assert!(!heal.is_healed());
+        sched.observe_view(1);
+        assert!(heal.is_healed());
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub struct TestConfig {
     pub minimum_nodes: i32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub view_partitions: Vec<ViewPartitionEntry>,
+    /// App-shard frame target (0 = app-shard verification disabled).
+    pub app_stop_frame: u64,
 }
 
 #[derive(Debug, Serialize)]

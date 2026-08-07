@@ -1,11 +1,15 @@
 name: quilibrium-devnet
 
-# Docker Compose configuration for running 4 Quilibrium archive nodes plus a
-# client node in isolated networks, fronted by the devnet proxy.
+# Docker Compose configuration for running 4 Quilibrium archive nodes plus 4
+# client nodes in isolated networks, fronted by the devnet proxy.
 #
 # The archive/client services run the Rust node, and the `proxy` service runs
 # the Rust devnet-proxy binary — both built from docker/Dockerfile.source (the
 # proxy as its `devnet-proxy` target stage, reusing the node's native build).
+#
+# The 4 clients each pin their single worker to the devnet token app — a
+# QUIL-clone deployed at testnet genesis by QUIL_SEED_APP_TOKEN — forming a
+# 4-member commonware-simplex committee (3-of-4 quorum) on its one shard.
 #
 # Usage:
 #   1. Start the nodes: docker compose up -d --build --remove-orphans
@@ -17,7 +21,32 @@ name: quilibrium-devnet
 #   RUN_ID: Required unique identifier for this test run
 #   RUNNER_ADDRESS: Runner's network address for notifications (default: host.docker.internal:8080)
 #   STOP_FRAME: Required maximum frame number before shutdown
+#   APP_STOP_FRAME: App-shard frame target for the devnet token app (0/empty = disabled)
 #   RUNNER_AUTH: Optional authentication credential for runner notifications
+#
+# QUIL_SEED_APP_TOKEN, QUIL_EPOCH_LENGTH_FRAMES, QUIL_IDEAL_FRAME_TIME_MS and
+# QUIL_MIN_DIFFICULTY are hardcoded once in the `x-node-env` anchor below and
+# merged into every node service (NOT ${VAR}-interpolated): all are
+# genesis/consensus parameters that must be identical net-wide — a node
+# missing the first two forks at genesis, and a divergent frame interval or
+# difficulty floor skews the ASERT target and the per-frame VDF. An
+# empty-but-present env var would still trip the node's `is_ok()` gate, so
+# interpolation is not safe for them; the single anchor is what keeps the
+# eight copies from drifting. Together the last two set the devnet global
+# cadence: 1000 ms target interval, with the difficulty floor lowered
+# 50000→5000 so the VDF solve (~0.25 s) fits inside it — ~1 s frames instead
+# of the 10 s default. The epoch is 15 frames (~15 s): short enough that the
+# join→confirm→Active→reconfirm activation (~2 epoch boundaries) completes in
+# well under a minute, but still comfortably above the 10-frame confirm window
+# it must contain. App-shard frames need no knob: they are unpaced under CW,
+# and their wall-clock cost (epochs, activation) is denominated in global
+# frames.
+
+x-node-env: &node-env
+  - QUIL_SEED_APP_TOKEN=1
+  - QUIL_EPOCH_LENGTH_FRAMES=15
+  - QUIL_IDEAL_FRAME_TIME_MS=1000
+  - QUIL_MIN_DIFFICULTY=5000
 
 networks:
   proxy-network:
@@ -35,6 +64,15 @@ networks:
     driver: bridge
     internal: true
   client-1-network:
+    driver: bridge
+    internal: true
+  client-2-network:
+    driver: bridge
+    internal: true
+  client-3-network:
+    driver: bridge
+    internal: true
+  client-4-network:
     driver: bridge
     internal: true
 
@@ -65,6 +103,7 @@ services:
       - VIEW_PARTITIONS=${VIEW_PARTITIONS}
       - GLOBAL_TIMEOUT=${GLOBAL_TIMEOUT}
       - NODE_CATCHUP_TIMEOUT=${NODE_CATCHUP_TIMEOUT}
+      - APP_STOP_FRAME=${APP_STOP_FRAME}
       - RUST_LOG=${RUST_LOG:-info}
     networks:
       - proxy-network
@@ -73,6 +112,9 @@ services:
       - archive-3-network
       - archive-4-network
       - client-1-network
+      - client-2-network
+      - client-3-network
+      - client-4-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -104,6 +146,7 @@ services:
     networks:
       - archive-1-network
     command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
     depends_on:
       proxy:
         condition: service_healthy
@@ -132,6 +175,7 @@ services:
     networks:
       - archive-2-network
     command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
     depends_on:
       proxy:
         condition: service_healthy
@@ -160,6 +204,7 @@ services:
     networks:
       - archive-3-network
     command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
     depends_on:
       proxy:
         condition: service_healthy
@@ -188,6 +233,7 @@ services:
     networks:
       - archive-4-network
     command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
     depends_on:
       proxy:
         condition: service_healthy
@@ -206,9 +252,24 @@ services:
         max-size: 100m
 
   # Non-archive (client) nodes
-  # Same binary as the archives, with engine.archiveMode=false. The Rust node's
-  # prover lifecycle automatically drives ProverJoin/ProverConfirm via the
-  # archive gRPC pool (routed through the proxy in devnet).
+  # Same binary as the archives, with engine.archiveMode=false. Each client's
+  # single worker is pinned to the devnet token app via
+  # engine.dataWorkerFilters; the pinned worker is `manually_managed`, so the
+  # devnet proxy's join driver issues the actual ProverJoin (RequestJoin over
+  # the plaintext NodeService), after which the node self-confirms and starts
+  # the shard consensus engine.
+  #
+  # Each client is constrained to 2 logical cores (`cpus: 2`) so the rust
+  # node's `available_parallelism - 1` worker pre-allocation produces exactly
+  # 1 worker — matching the single pinned filter, which the proxy's enrollment
+  # monitor asserts. Optional cpuset PINNING keeps the four clients from
+  # starving each other during proving (the 4-member committee needs 3-of-4
+  # live) on hosts with enough cores: opt in with
+  #   CLIENT_1_CPUSET=0-1 CLIENT_2_CPUSET=2-3 CLIENT_3_CPUSET=4-5 \
+  #   CLIENT_4_CPUSET=6-7 docker compose up ...
+  # Unset (the default) means no pin — hardcoded pins made docker refuse to
+  # start client-3/4 on any host with fewer than 8 logical CPUs, failing even
+  # global-only runs.
   client-1:
     build:
       context: ../..
@@ -217,14 +278,12 @@ services:
         TARGETOS: linux
         TARGETARCH: ${TARGETARCH:-arm64}
     image: quilibrium-node:latest
-    # Constrain to CPUs 0-2 (3 logical cores) so the rust node's
-    # `available_parallelism - 1` worker pre-allocation produces
-    # exactly 2 workers. The proxy's enrollment monitor asserts
-    # this expected core count.
-    cpuset: "0-2"
+    cpuset: "${CLIENT_1_CPUSET:-}"
+    cpus: 2
     networks:
       - client-1-network
     command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
     depends_on:
       proxy:
         condition: service_healthy
@@ -240,6 +299,123 @@ services:
        - ./config/client-1-config:/root/config
     healthcheck:
       test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmU69pvLMYqcvaGvthhi1qJFyRmkGv3Ht9xjtLdjgvruNk"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  client-2:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    cpuset: "${CLIENT_2_CPUSET:-}"
+    cpus: 2
+    networks:
+      - client-2-network
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
+    depends_on:
+      proxy:
+        condition: service_healthy
+      archive-1:
+        condition: service_healthy
+      archive-2:
+        condition: service_healthy
+      archive-3:
+        condition: service_healthy
+      archive-4:
+        condition: service_healthy
+    volumes:
+       - ./config/client-2-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmTNM9QmQky14qSabPTfLH3S41EvTyKDgaLcSxTywimofH"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  client-3:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    cpuset: "${CLIENT_3_CPUSET:-}"
+    cpus: 2
+    networks:
+      - client-3-network
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
+    depends_on:
+      proxy:
+        condition: service_healthy
+      archive-1:
+        condition: service_healthy
+      archive-2:
+        condition: service_healthy
+      archive-3:
+        condition: service_healthy
+      archive-4:
+        condition: service_healthy
+    volumes:
+       - ./config/client-3-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmQb6FUAy7mu5JQDhYXdWsDj3NiGHkRspUFgkXqXWc1Req"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: 100m
+
+  client-4:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.source
+      args:
+        TARGETOS: linux
+        TARGETARCH: ${TARGETARCH:-arm64}
+    image: quilibrium-node:latest
+    cpuset: "${CLIENT_4_CPUSET:-}"
+    cpus: 2
+    networks:
+      - client-4-network
+    command: ["--network=1", "--signature-check=false", "--config=/root/config", "--debug"]
+    environment: *node-env
+    depends_on:
+      proxy:
+        condition: service_healthy
+      archive-1:
+        condition: service_healthy
+      archive-2:
+        condition: service_healthy
+      archive-3:
+        condition: service_healthy
+      archive-4:
+        condition: service_healthy
+    volumes:
+       - ./config/client-4-config:/root/config
+    healthcheck:
+      test: ["CMD", "p2p-ping", "-timeout", "5s", "/ip4/127.0.0.1/udp/8336/quic-v1/p2p/QmX5N5vZAYbGe9vAYg3eYuyPVWovtjiq41mgUah48jvk7o"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -15,6 +15,89 @@ use quil_types::consensus::DifficultyAdjuster;
 /// Target frame interval in milliseconds (10 seconds).
 pub const IDEAL_FRAME_TIME: i64 = 10_000;
 
+/// Process-global override of the target frame interval. Defaults to
+/// [`IDEAL_FRAME_TIME`]; dev networks shrink it via `QUIL_IDEAL_FRAME_TIME_MS`
+/// (wired in the node's master init, gated to any NON-MAINNET network — the
+/// gate is `network != 0`, so it also applies on a public testnet, where a
+/// mismatched value forks the chain; like `QUIL_EPOCH_LENGTH_FRAMES`).
+/// CONSENSUS PARAMETER: it feeds the ASERT difficulty target and the
+/// proposer's frame pacing/timestamp stamping, so every node in the net MUST
+/// run the same value. The effective cadence floor stays the VDF solve time
+/// at [`MIN_DIFFICULTY`] (~3 s) — an interval below that just makes the
+/// proposer VDF-bound instead of sleep-bound.
+static IDEAL_FRAME_TIME_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(IDEAL_FRAME_TIME);
+
+/// Lowest settable target frame interval: below ~100 ms the proposer's pacing
+/// sleep degenerates into a busy spin with no legitimate dev use.
+pub const MIN_IDEAL_FRAME_TIME_MS: i64 = 100;
+
+/// Override the target frame interval (milliseconds). Dev-network only — see
+/// [`IDEAL_FRAME_TIME_MS`]. Accepts only
+/// `MIN_IDEAL_FRAME_TIME_MS..=IDEAL_FRAME_TIME` and returns whether the value
+/// was applied. The upper bound is a hard safety line, not taste: `ideal ×
+/// frame_delta` feeds `compute_difficulty`'s Q16 pipeline, whose
+/// `wrapping_mul(RADIX)` overflows i64 once `|time_delta − ideal×delta|`
+/// reaches 2^47 — a huge interval (e.g. a units mistake like 1e13) wraps
+/// within ~14 frames of the anchor and difficulty silently oscillates between
+/// `u64::MAX` (unsolvable) and the floor. Values above the mainnet default
+/// have no legitimate dev use; raising the cadence beyond it is not a
+/// supported configuration.
+#[must_use]
+pub fn set_ideal_frame_time_ms(ms: i64) -> bool {
+    if (MIN_IDEAL_FRAME_TIME_MS..=IDEAL_FRAME_TIME).contains(&ms) {
+        IDEAL_FRAME_TIME_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+/// The effective target frame interval in milliseconds.
+pub fn ideal_frame_time_ms() -> i64 {
+    IDEAL_FRAME_TIME_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Process-global override of the difficulty floor. Defaults to
+/// [`MIN_DIFFICULTY`]; dev networks shrink it via `QUIL_MIN_DIFFICULTY`
+/// (wired in the node's master init, gated to any NON-MAINNET network, incl.
+/// public testnets). On a devnet the ASERT anchor decays to the floor
+/// immediately, so the floor IS the operating difficulty — lowering it is
+/// what shortens the per-frame VDF solve (~50_000 ≈ 2.5-3 s; roughly linear
+/// in the difficulty). CONSENSUS PARAMETER: proposers solve and followers
+/// verify at the header's stated difficulty, but a mixed-floor net would
+/// produce frames some nodes consider implausibly cheap — set it identically
+/// everywhere or not at all.
+static MIN_DIFFICULTY_RT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(MIN_DIFFICULTY);
+
+/// Lowest settable difficulty floor: below ~1000 the VDF solve is effectively
+/// free and frame cadence is pure network/IO noise.
+pub const MIN_SETTABLE_DIFFICULTY: u64 = 1_000;
+
+/// Override the difficulty floor. Dev-network only — see
+/// [`MIN_DIFFICULTY_RT`]. Accepts only
+/// `MIN_SETTABLE_DIFFICULTY..=MIN_DIFFICULTY` (the knob may LOWER the mainnet
+/// floor for a faster dev cadence, never raise it) and returns whether the
+/// value was applied. The upper bound also keeps every difficulty value
+/// u32-representable: the frame header and VDF challenge builders cast
+/// difficulty `as u32`, so a floor above `u32::MAX` would silently truncate
+/// (e.g. 2^32 → 0).
+#[must_use]
+pub fn set_min_difficulty(d: u64) -> bool {
+    if (MIN_SETTABLE_DIFFICULTY..=MIN_DIFFICULTY).contains(&d) {
+        MIN_DIFFICULTY_RT.store(d, std::sync::atomic::Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+/// The effective difficulty floor.
+pub fn min_difficulty() -> u64 {
+    MIN_DIFFICULTY_RT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// ASERT half-life in milliseconds (2 hours).
 pub const HALF_LIFE: i64 = 7_200_000;
 
@@ -56,9 +139,11 @@ impl DifficultyAdjuster for AsertDifficultyAdjuster {
         // Q16 radix: 1 << 16.
         const RADIX: i64 = 1 << 16;
 
-        // Bootstrap path: uninitialised anchor → return the floor.
+        // Bootstrap path: uninitialised anchor → return the floor
+        // (`BOOTSTRAP_DIFFICULTY` == `MIN_DIFFICULTY`, so this honors the
+        // dev-network floor override and is unchanged without one).
         if self.anchor_difficulty == 0 {
-            return BOOTSTRAP_DIFFICULTY;
+            return min_difficulty();
         }
 
         // Height and time deltas from the anchor. `frameNumberDelta`
@@ -77,7 +162,7 @@ impl DifficultyAdjuster for AsertDifficultyAdjuster {
         // `wrapping_*` to preserve Go behaviour on pathological
         // inputs. Normal mainnet inputs never approach the overflow
         // boundary.
-        let ideal_x_delta = IDEAL_FRAME_TIME
+        let ideal_x_delta = ideal_frame_time_ms()
             .wrapping_mul(frame_number_delta.wrapping_add(1));
         let inner = time_delta.wrapping_sub(ideal_x_delta);
         let numerator = inner.wrapping_mul(RADIX).wrapping_neg();
@@ -131,8 +216,9 @@ impl DifficultyAdjuster for AsertDifficultyAdjuster {
         scaled >>= 16;
 
         // Floor.
-        if scaled < MIN_DIFFICULTY {
-            return MIN_DIFFICULTY;
+        let floor = min_difficulty();
+        if scaled < floor {
+            return floor;
         }
         scaled
     }
@@ -342,5 +428,39 @@ mod tests {
             "24h halt should clamp to floor, got {}",
             d_mega,
         );
+    }
+
+    /// The cadence-override setters refuse out-of-range values (leaving the
+    /// effective value untouched) and apply in-range ones. One combined test:
+    /// the overrides are process-global atomics, so keeping every mutation in
+    /// a single test avoids order dependence on other tests in this binary.
+    #[test]
+    fn cadence_overrides_are_range_checked() {
+        // Out-of-range: refused, default stays.
+        assert!(!set_ideal_frame_time_ms(0));
+        assert!(!set_ideal_frame_time_ms(-5));
+        assert!(!set_ideal_frame_time_ms(MIN_IDEAL_FRAME_TIME_MS - 1));
+        assert!(!set_ideal_frame_time_ms(IDEAL_FRAME_TIME + 1));
+        // The units-mistake case that wraps the ASERT Q16 math (~1e13 ms).
+        assert!(!set_ideal_frame_time_ms(10_000_000_000_000));
+        assert_eq!(ideal_frame_time_ms(), IDEAL_FRAME_TIME);
+
+        assert!(!set_min_difficulty(0));
+        assert!(!set_min_difficulty(MIN_SETTABLE_DIFFICULTY - 1));
+        // May only LOWER the floor, never raise it (also keeps it u32-safe
+        // for the `difficulty as u32` header/VDF casts).
+        assert!(!set_min_difficulty(MIN_DIFFICULTY + 1));
+        assert!(!set_min_difficulty(u64::from(u32::MAX) + 1));
+        assert_eq!(min_difficulty(), MIN_DIFFICULTY);
+
+        // In-range: applied.
+        assert!(set_ideal_frame_time_ms(1_000));
+        assert_eq!(ideal_frame_time_ms(), 1_000);
+        assert!(set_min_difficulty(5_000));
+        assert_eq!(min_difficulty(), 5_000);
+
+        // Restore defaults for any test sharing this process.
+        assert!(set_ideal_frame_time_ms(IDEAL_FRAME_TIME));
+        assert!(set_min_difficulty(MIN_DIFFICULTY));
     }
 }

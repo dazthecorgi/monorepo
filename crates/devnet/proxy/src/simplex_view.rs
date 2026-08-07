@@ -46,6 +46,21 @@ pub enum VoteKind {
     Finalize,
 }
 
+impl VoteKind {
+    /// Whether a vote-channel message of this kind attests that its sender is
+    /// actively driving the view forward.
+    ///
+    /// A `Nullify` says the view produced nothing; it is what a stalled member
+    /// emits and is not evidence that the sender voted for anything. Both
+    /// participation checks — global rejoin and app-shard — turn on exactly
+    /// this distinction, so they share one definition of it. Nothing is lost by
+    /// excluding nullifications: a participating member broadcasts its own
+    /// `Notarize`/`Finalize` to every peer.
+    pub fn is_active_vote(self) -> bool {
+        matches!(self, Self::Notarize | Self::Finalize)
+    }
+}
+
 /// The round a simplex vote or certificate refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimplexView {
