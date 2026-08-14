@@ -19,6 +19,7 @@
 mod common;
 use common::*;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -146,6 +147,33 @@ async fn app_consensus_cw_multi_prover_finalizes() {
         "app CW chain did not advance past genesis (frame_number = {})",
         header.frame_number
     );
+}
+
+/// The test checks that one replica never observes a repeated finalized
+/// app frame number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn app_consensus_cw_multi_prover_no_repeated_frame_number() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_test_writer()
+        .try_init();
+
+    let harness = AppShardHarness::build_cw(3);
+
+    let frames = harness
+        .wait_for_full_frames_from_one_worker(4, std::time::Duration::from_secs(90))
+        .await
+        .expect("one 3-prover app CW replica should finalize four shard frames within 90s");
+    let headers = frames.into_iter().map(|frame| frame.header.expect("finalized frame has a header")).collect::<Vec<_>>();
+
+    let frame_ids_dedup = headers.iter().map(|header| &header.output).collect::<HashSet<_>>();
+    assert_eq!(frame_ids_dedup.len(), headers.len(), "app CW finalized duplicate frame ids");
+
+    let frame_numbers_dedup = headers.iter().map(|header| header.frame_number).collect::<HashSet<_>>();
+    assert_eq!(frame_numbers_dedup.len(), headers.len(), "app CW finalized duplicate frame numbers");
 }
 
 /// Active PoRep path end-to-end through the live consensus harness.

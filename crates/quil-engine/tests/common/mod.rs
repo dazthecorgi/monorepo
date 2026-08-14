@@ -972,6 +972,44 @@ impl AppShardHarness {
         }
         None
     }
+
+    /// Wait until one worker has observed `count` finalized shard frames, then
+    /// decode and return that worker's first `count` frames. Keeping all frames
+    /// from one worker avoids counting the same committee finalization once per
+    /// replica when a test checks frame-number uniqueness.
+    pub async fn wait_for_full_frames_from_one_worker(
+        &self,
+        count: usize,
+        timeout: std::time::Duration,
+    ) -> Option<Vec<gpb::AppShardFrame>> {
+        assert!(count > 0, "need at least one finalized frame");
+
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            for worker in &self.workers {
+                let captured = {
+                    let frames = worker.full_frames.lock();
+                    (frames.len() >= count)
+                        .then(|| frames.iter().take(count).cloned().collect::<Vec<_>>())
+                };
+                let Some(captured) = captured else {
+                    continue;
+                };
+
+                let decoded = captured
+                    .iter()
+                    .map(|bytes| {
+                        <gpb::AppShardFrame as prost::Message>::decode(bytes.as_slice()).ok()
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if decoded.is_some() {
+                    return decoded;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        None
+    }
 }
 
 // =====================================================================
